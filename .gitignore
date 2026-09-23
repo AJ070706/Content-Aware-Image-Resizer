@@ -1,0 +1,25 @@
+# Generated Python and native build files
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.dll
+*.obj
+*.o
+*.lib
+*.exp
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+# Local input/output images
+/images/
+# Local secrets and operating-system files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+Thumbs.db
+.DS_Store
