@@ -4,7 +4,7 @@ A local desktop image-processing application with a React/TypeScript interface, 
 
 ## Current capabilities
 
-Open images, preview vertical seams in red, restore the original, change preview scale, and export PNG files. Processing stays on your computer. This version highlights seams; actual resizing, enlargement, and height adjustment are not yet supported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
+Open images, preview vertical seams in red, restore the original, change preview scale, and export PNG files. Processing stays on your computer. This version highlights seams; the desktop interface does not yet expose actual resizing or height adjustment. The C++ backend supports shrinking both dimensions; enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
 
 ## Windows setup
 
@@ -30,3 +30,11 @@ The target Windows machine must have Microsoft Edge WebView2 Runtime and .NET Fr
 ## Verification
 
 Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\python.exe -m unittest discover -s tests`. The packaged executable accepts `--smoke-test <absolute-result.json>` to check React and bridge startup and exit. The source snapshot and dependency log identify each build independently of later edits.
+
+## Native engine contract
+
+`main.modify(image, new_width, new_height)` shrinks width first, then height by removing one minimum-energy seam at a time. Energy is the sum of absolute RGB differences between clamped left/right and up/down neighbors. Ties choose the leftmost bottom endpoint, then the leftmost predecessor while backtracking. Horizontal seams use the same rule on the transposed image.
+
+`main.highlight` runs the same carving sequence but marks every removed pixel red at its original position and returns the original dimensions. Both functions accept nonempty NumPy uint8 RGB/RGBA arrays, including strided or read-only views; they return independent contiguous arrays and preserve alpha. Targets must be integers within the original dimensions. Invalid shapes, types, empty images, and enlargement requests raise exceptions. Native computation releases the Python GIL after copying the input.
+
+Native tests use exhaustive path enumeration on small images to verify optimal seams, exact output pixels, original-coordinate highlighting, all valid small target sizes, alpha, input validation, and array layouts.
