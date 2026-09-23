@@ -106,6 +106,62 @@ class ImageApi:
         computed, total, done = order.progress()
         return dict(computed=computed, total=total, done=done, error=error)
 
+    def seam_batch(self, direction, first, limit, image_generation):
+        with self._lock:
+            if self._original is None or image_generation != self._generation:
+                raise ValueError('The image changed before its seam preview was ready.')
+            if direction not in ('width', 'height'):
+                raise ValueError('Choose either width or height adjustment.')
+            maximum = self._original.width if direction == 'width' else self._original.height
+            if isinstance(first, bool) or not isinstance(first, int) or not 1 <= first < maximum:
+                raise ValueError('Requested seam is outside the image dimension.')
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError('Seam batch size must be positive.')
+            ready = self._order_ready[direction]
+        ready.wait()
+        with self._lock:
+            if image_generation != self._generation:
+                raise ValueError('The image changed before its seam preview was ready.')
+            order = self._orders[direction]
+            error = self._order_errors[direction]
+        if error:
+            raise RuntimeError(error)
+        if order is None:
+            raise RuntimeError('Seam order could not be started.')
+        seams = order.seam_positions_batch(first, limit).tolist()
+        with self._lock:
+            if image_generation != self._generation:
+                raise ValueError('The image changed before its seam preview was ready.')
+        return dict(first=first, seams=seams)
+
+    def select_preview(self, direction, target, request_id, image_generation):
+        with self._lock:
+            if self._original is None or image_generation != self._generation:
+                raise ValueError('The image changed before its seam preview was ready.')
+            if direction not in ('width', 'height'):
+                raise ValueError('Choose either width or height adjustment.')
+            maximum = self._original.width if direction == 'width' else self._original.height
+            if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum:
+                raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum}.')
+            if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id < 0:
+                raise ValueError('Preview request ID must be a nonnegative whole number.')
+            if request_id < self._latest_preview_request_id:
+                raise ValueError('A newer seam preview has replaced this request.')
+            self._latest_preview_request_id = request_id
+            self._selection = None
+            order = self._orders[direction]
+            count = maximum - target
+        if count:
+            if order is None or order.progress()[0] < count:
+                raise RuntimeError('The requested seam has not been calculated yet.')
+        with self._lock:
+            if image_generation != self._generation:
+                raise ValueError('The image changed before its seam preview was ready.')
+            if request_id != self._latest_preview_request_id:
+                raise ValueError('A newer seam preview has replaced this request.')
+            self._selection = (order, count) if count else None
+        return dict(target=target)
+
     def preview(self, direction, target, request_id=0, image_generation=None):
         with self._lock:
             if self._original is None:

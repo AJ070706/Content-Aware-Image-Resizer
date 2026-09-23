@@ -39,6 +39,8 @@ The desktop preview starts independent vertical and horizontal seam-order worker
 
 Highlight seams is the active mode. Editing the target dimension updates the preview automatically; the width field and slider share one target value. Modify image is shown as unavailable until resizing is implemented.
 
+The live preview tracks its current highlighted dimension and paints or erases recorded seam pixels on a transparent canvas toward the latest target. Seam pixels are fetched in small batches as they become available; the saved PNG is rendered from the same cached seam order. A calculation message appears only while the next required seam is still being computed.
+
 `main.highlight` runs the same carving sequence but marks every removed pixel red at its original position and returns the original dimensions. Both functions accept nonempty NumPy uint8 RGB/RGBA arrays, including strided or read-only views; they return independent contiguous arrays and preserve alpha. Targets must be integers within the original dimensions. Invalid shapes, types, empty images, and enlargement requests raise exceptions. Native computation releases the Python GIL after copying the input.
 
 Native tests use exhaustive path enumeration on small images to verify optimal seams, exact output pixels, original-coordinate highlighting, all valid small target sizes, alpha, input validation, and array layouts.

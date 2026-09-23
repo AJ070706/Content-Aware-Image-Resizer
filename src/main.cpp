@@ -305,6 +305,29 @@ public:
         return result;
     }
 
+    py::array_t<uint64_t> seam_positions_batch(int first, int limit) const {
+        if (first < 1 || first > total_ || limit < 1)
+            throw py::value_error("requested seam batch is outside the available image dimension");
+        wait_for_count(first);
+        int available;
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            available = std::min(limit, computed_ - first + 1);
+        }
+        py::array_t<uint64_t> result({available, seam_length_});
+        auto* positions = result.mutable_data();
+        {
+            // The published prefix never changes; the worker may fill later
+            // slots while this batch is copied without holding its mutex.
+            py::gil_scoped_release release;
+            const size_t offset = static_cast<size_t>(first - 1) * seam_length_;
+            const size_t length = static_cast<size_t>(available) * seam_length_;
+            for (size_t i = 0; i < length; ++i)
+                positions[i] = static_cast<uint64_t>(ordered_pixels_[offset + i]);
+        }
+        return result;
+    }
+
 private:
     void wait_for_count(int count) const {
         if (count < 0 || count > total_)
@@ -383,5 +406,8 @@ PYBIND11_MODULE(main, m) {
         .def("render", &SeamOrder::render, py::arg("count"),
              "Wait for the requested seam prefix and return its original-image preview.")
         .def("render_overlay", &SeamOrder::render_overlay, py::arg("count"),
-             "Wait for the requested seam prefix and return a transparent red overlay.");
+             "Wait for the requested seam prefix and return a transparent red overlay.")
+        .def("seam_positions_batch", &SeamOrder::seam_positions_batch,
+             py::arg("first"), py::arg("limit"),
+             "Wait for the first requested seam and return published pixel positions.");
 }

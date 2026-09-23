@@ -131,6 +131,11 @@ class NativeTests(unittest.TestCase):
                 np.testing.assert_array_equal(preview,expected)
                 np.testing.assert_array_equal(overlay[:,:,3] == 255,
                     np.all(preview[:,:,:3] == (255,0,0), axis=2))
+                if removed:
+                    positions = order.seam_positions_batch(removed, 1)[0]
+                    previous = order.render_overlay(removed - 1)[:,:,3]
+                    added = np.flatnonzero((overlay[:,:,3] == 255) & (previous == 0))
+                    np.testing.assert_array_equal(np.sort(positions), added)
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
             self.assertEqual(order.progress(), (total,total,True))

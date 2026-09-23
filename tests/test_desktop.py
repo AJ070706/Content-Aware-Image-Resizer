@@ -35,6 +35,12 @@ class DesktopTests(unittest.TestCase):
             overlay = Image.open(io.BytesIO(base64.b64decode(result['overlay'].split(',')[1])))
             self.assertEqual(overlay.size, (16,12))
             self.assertTrue(np.any(np.asarray(overlay)[:,:,3] == 255))
+            batch = api.seam_batch('width', 1, 3, opened['generation'])
+            self.assertEqual(batch['first'], 1)
+            self.assertGreaterEqual(len(batch['seams']), 1)
+            self.assertEqual(len(batch['seams'][0]), 12)
+            self.assertEqual(api.select_preview('width', 12, 2, opened['generation']), {'target': 12})
+            self.assertEqual(api._selection[1], 4)
             api._window = DialogWindow(str(output))
             api.save_image()
             with Image.open(output) as image:
