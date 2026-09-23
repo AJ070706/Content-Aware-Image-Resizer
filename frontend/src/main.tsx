@@ -3,12 +3,13 @@ import { createRoot } from 'react-dom/client';
 import './style.css';
 
 type Picture = { name: string; width: number; height: number; preview: string };
+type Overlay = { overlay: string };
 type Progress = { computed: number; total: number; done: boolean; error: string | null };
 type Direction = 'width' | 'height';
 type Api = {
   open_image: () => Promise<Picture | null>;
   reset: () => Promise<Picture>;
-  preview: (direction: Direction, target: number) => Promise<Picture>;
+  preview: (direction: Direction, target: number) => Promise<Overlay>;
   preview_progress: (direction: Direction) => Promise<Progress>;
   save_image: () => Promise<string | null>;
 };
@@ -19,6 +20,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [calculating, setCalculating] = useState(false);
   const [pic, setPic] = useState<Picture | null>(null);
+  const [overlay, setOverlay] = useState<string | null>(null);
   const [direction, setDirection] = useState<Direction>('width');
   const [target, setTarget] = useState('');
   const [progress, setProgress] = useState<Progress | null>(null);
@@ -57,6 +59,7 @@ function App() {
     const image = await api.open_image();
     if (!image) return;
     setPic(image);
+    setOverlay(null);
     setDirection('width');
     setTarget(String(image.width));
     setProgress(null);
@@ -77,8 +80,8 @@ function App() {
     setCalculating(true);
     setProgress(null);
     return action(async api => {
-      const image = await api.preview(direction, Number(target));
-      setPic(image);
+      const result = await api.preview(direction, Number(target));
+      setOverlay(result.overlay);
       setMessage(`${direction === 'width' ? 'Vertical' : 'Horizontal'} seam preview ready. Background calculation continues.`);
     }).finally(() => setCalculating(false));
   };
@@ -86,6 +89,7 @@ function App() {
   const reset = () => action(async api => {
     const image = await api.reset();
     setPic(image);
+    setOverlay(null);
     setTarget(String(direction === 'width' ? image.width : image.height));
     setProgress(null);
     setMessage('Original image restored. Both seam orders continue calculating.');
@@ -99,7 +103,10 @@ function App() {
     <main><section className="workspace">
       <div className="canvasbar"><span>{pic?.name ?? 'Your workspace'}</span><label>View <select value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">Fit to window</option><option value="1">100%</option><option value="0.5">50%</option><option value="0.25">25%</option></select></label></div>
       <div className={'canvas ' + (zoom === 'fit' ? 'fit' : 'actual')} aria-busy={busy}>
-        {pic ? <img alt="Image preview" src={pic.preview} style={zoom === 'fit' ? {} : { width: pic.width * Number(zoom), maxWidth: 'none', maxHeight: 'none' }} />
+        {pic ? <div className="image-stage" style={zoom === 'fit' ? {} : { width: pic.width * Number(zoom), height: pic.height * Number(zoom) }}>
+          <img className="base-image" alt="Image preview" src={pic.preview} />
+          {overlay && <img className="seam-overlay" alt="" aria-hidden="true" src={overlay} />}
+        </div>
           : <div className="empty"><span className="emptyicon">▧</span><h1>A new perspective<br />on your images.</h1><p>Explore the seams that shape an image.<br />Everything stays on your computer.</p><button className="primary" disabled={!ready || busy} onClick={open}>Choose an image</button><small>PNG · JPEG · WEBP · BMP · TIFF</small></div>}
       </div>
     </section>

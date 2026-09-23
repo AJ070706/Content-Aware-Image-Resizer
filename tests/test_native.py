@@ -125,9 +125,12 @@ class NativeTests(unittest.TestCase):
             worker.start()
             for removed in range(total+1):
                 preview = order.render(removed)
+                overlay = order.render_overlay(removed)
                 expected = (engine.highlight(image,image.shape[1]-removed,image.shape[0])
                             if width_mode else engine.highlight(image,image.shape[1],image.shape[0]-removed))
                 np.testing.assert_array_equal(preview,expected)
+                np.testing.assert_array_equal(overlay[:,:,3] == 255,
+                    np.all(preview[:,:,:3] == (255,0,0), axis=2))
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
             self.assertEqual(order.progress(), (total,total,True))

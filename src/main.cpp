@@ -269,18 +269,7 @@ public:
     }
 
     py::array_t<uint8_t> render(int count) const {
-        if (count < 0 || count > total_)
-            throw py::value_error("requested seam count is outside the available image dimension");
-        {
-            py::gil_scoped_release release;
-            std::unique_lock<std::mutex> lock(mutex_);
-            condition_.wait(lock, [&] { return (source_ready_ && computed_ >= count) || done_; });
-        }
-        {
-            std::lock_guard<std::mutex> guard(mutex_);
-            if (!error_.empty()) throw std::runtime_error(error_);
-            if (computed_ < count) throw std::runtime_error("seam calculation was cancelled");
-        }
+        wait_for_count(count);
         py::array_t<uint8_t> result({height_, width_, channels_});
         auto* pixels = result.mutable_data();
         {
@@ -299,7 +288,37 @@ public:
         return result;
     }
 
+    py::array_t<uint8_t> render_overlay(int count) const {
+        wait_for_count(count);
+        py::array_t<uint8_t> result({height_, width_, 4});
+        auto* pixels = result.mutable_data();
+        {
+            py::gil_scoped_release release;
+            std::memset(pixels, 0, static_cast<size_t>(width_) * height_ * 4);
+            const size_t seam_pixels = static_cast<size_t>(count) * seam_length_;
+            for (size_t i = 0; i < seam_pixels; ++i) {
+                const size_t offset = ordered_pixels_[i] * 4;
+                pixels[offset] = 255;
+                pixels[offset + 3] = 255;
+            }
+        }
+        return result;
+    }
+
 private:
+    void wait_for_count(int count) const {
+        if (count < 0 || count > total_)
+            throw py::value_error("requested seam count is outside the available image dimension");
+        {
+            py::gil_scoped_release release;
+            std::unique_lock<std::mutex> lock(mutex_);
+            condition_.wait(lock, [&] { return (source_ready_ && computed_ >= count) || done_; });
+        }
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!error_.empty()) throw std::runtime_error(error_);
+        if (computed_ < count) throw std::runtime_error("seam calculation was cancelled");
+    }
+
     py::array input_; // Retain the source without copying on the image-load path.
     int width_ = 0, height_ = 0, channels_ = 0, total_ = 0, seam_length_ = 0;
     bool horizontal_ = false;
@@ -362,5 +381,7 @@ PYBIND11_MODULE(main, m) {
         .def("cancel", &SeamOrder::cancel)
         .def("progress", &SeamOrder::progress)
         .def("render", &SeamOrder::render, py::arg("count"),
-             "Wait for the requested seam prefix and return its original-image preview.");
+             "Wait for the requested seam prefix and return its original-image preview.")
+        .def("render_overlay", &SeamOrder::render_overlay, py::arg("count"),
+             "Wait for the requested seam prefix and return a transparent red overlay.");
 }

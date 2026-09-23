@@ -1,3 +1,5 @@
+import base64
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,11 +27,15 @@ class DesktopTests(unittest.TestCase):
             for width in [0, 17, 1.5, True, '8']:
                 with self.assertRaises(ValueError): api.preview('width', width)
             result = api.preview('width', 12)
-            self.assertEqual((result['width'],result['height']), (16,12))
-            self.assertTrue(np.any(np.array(api._current)[:,:,0] == 255))
+            self.assertNotIn('preview', result)
+            overlay = Image.open(io.BytesIO(base64.b64decode(result['overlay'].split(',')[1])))
+            self.assertEqual(overlay.size, (16,12))
+            self.assertTrue(np.any(np.asarray(overlay)[:,:,3] == 255))
             api._window = DialogWindow(str(output))
             api.save_image()
-            with Image.open(output) as image: self.assertEqual(image.size,(16,12))
+            with Image.open(output) as image:
+                self.assertEqual(image.size,(16,12))
+                self.assertTrue(np.any(np.asarray(image)[:,:,0] == 255))
             api.reset()
             self.assertTrue(np.all(np.array(api._current) == 75))
             api._window = DialogWindow(None)

@@ -23,6 +23,7 @@ class ImageApi:
         self._orders = {'width': None, 'height': None}
         self._order_ready = {'width': threading.Event(), 'height': threading.Event()}
         self._order_errors = {'width': None, 'height': None}
+        self._selection = None
 
     def _snapshot(self):
         buffer = io.BytesIO()
@@ -44,6 +45,7 @@ class ImageApi:
         self._orders = {'width': None, 'height': None}
         self._order_ready = {'width': threading.Event(), 'height': threading.Event()}
         self._order_errors = {'width': None, 'height': None}
+        self._selection = None
         snapshot = self._snapshot()
         for direction in ('width', 'height'):
             threading.Thread(target=self._calculate_order,
@@ -84,6 +86,7 @@ class ImageApi:
             if self._original is None:
                 raise ValueError('Open an image first.')
             self._current = self._original.copy()
+            self._selection = None
             return self._snapshot()
 
     def preview_progress(self, direction):
@@ -121,12 +124,15 @@ class ImageApi:
             raise RuntimeError(error)
         if order is None:
             raise RuntimeError('Seam order could not be started.')
-        preview = Image.fromarray(order.render(maximum - target))
+        count = maximum - target
+        buffer = io.BytesIO()
+        Image.fromarray(order.render_overlay(count)).save(buffer, format='PNG', compress_level=1)
+        overlay = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
         with self._lock:
             if generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
-            self._current = preview
-            return self._snapshot()
+            self._selection = (order, count)
+            return dict(overlay=overlay)
 
     def save_image(self):
         with self._lock:
@@ -139,7 +145,8 @@ class ImageApi:
             path = Path(path[0] if isinstance(path, (list, tuple)) else path)
             if path.suffix.lower() != '.png':
                 path = path.with_suffix('.png')
-            self._current.save(path, format='PNG')
+            image = Image.fromarray(self._selection[0].render(self._selection[1])) if self._selection else self._current
+            image.save(path, format='PNG')
             return str(path)
 
 
