@@ -1,13 +1,17 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cstddef>
+#include <condition_variable>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -183,6 +187,124 @@ void carve_width(Image& working, int target, std::vector<uint8_t>* marked, Carve
     }
 }
 
+// One independently ordered direction. Python owns the background worker;
+// this object publishes completed seams incrementally for responsive previews.
+class SeamOrder {
+public:
+    SeamOrder(py::array input, const std::string& direction)
+        : input_(std::move(input)), horizontal_(direction == "horizontal") {
+        if (direction != "horizontal" && direction != "vertical")
+            throw py::value_error("direction must be 'horizontal' or 'vertical'");
+        if (!input_.dtype().is(py::dtype::of<uint8_t>()))
+            throw py::type_error("image must have dtype uint8");
+        if (input_.ndim() != 3 || (input_.shape(2) != 3 && input_.shape(2) != 4))
+            throw py::value_error("image must have shape (height, width, 3 or 4) for RGB or RGBA");
+        if (input_.shape(0) < 1 || input_.shape(1) < 1 ||
+            input_.shape(0) > std::numeric_limits<int>::max() ||
+            input_.shape(1) > std::numeric_limits<int>::max())
+            throw py::value_error("image dimensions must be positive and fit in a 32-bit integer");
+        width_ = static_cast<int>(input_.shape(1));
+        height_ = static_cast<int>(input_.shape(0));
+        channels_ = static_cast<int>(input_.shape(2));
+        total_ = (horizontal_ ? height_ : width_) - 1;
+    }
+
+    void compute_all() {
+        if (started_.exchange(true)) throw std::runtime_error("seam order calculation has already started");
+        try {
+            Image working = read_image(input_); // Small, one-time copy before releasing the GIL.
+            {
+                py::gil_scoped_release release;
+                original_ = working.pixels;
+                working.origins.resize(static_cast<size_t>(width_) * height_);
+                std::iota(working.origins.begin(), working.origins.end(), size_t{0});
+                {
+                    std::lock_guard<std::mutex> guard(mutex_);
+                    ranks_.resize(static_cast<size_t>(width_) * height_);
+                    source_ready_ = true;
+                }
+                condition_.notify_all();
+                if (horizontal_) transpose(working);
+                CarveWorkspace workspace;
+                for (int count = 1; count <= total_ && !cancelled_.load(); ++count) {
+                    const auto seam = find_vertical_seam(working, workspace);
+                    {
+                        std::lock_guard<std::mutex> guard(mutex_);
+                        for (int row = 0; row < working.height; ++row)
+                            ranks_[working.origins[working.index(row, seam[row])]] = static_cast<uint32_t>(count);
+                        computed_ = count;
+                    }
+                    remove_vertical_seam(working, seam, workspace);
+                    condition_.notify_all();
+                }
+            }
+            {
+                std::lock_guard<std::mutex> guard(mutex_);
+                done_ = true;
+            }
+            condition_.notify_all();
+        } catch (const std::exception& error) {
+            std::lock_guard<std::mutex> guard(mutex_);
+            error_ = error.what();
+            done_ = true;
+            condition_.notify_all();
+        } catch (...) {
+            std::lock_guard<std::mutex> guard(mutex_);
+            error_ = "Unknown seam calculation error";
+            done_ = true;
+            condition_.notify_all();
+        }
+    }
+
+    void cancel() {
+        cancelled_.store(true);
+        condition_.notify_all();
+    }
+
+    py::tuple progress() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return py::make_tuple(computed_, total_, done_);
+    }
+
+    py::array_t<uint8_t> render(int count) const {
+        if (count < 0 || count > total_)
+            throw py::value_error("requested seam count is outside the available image dimension");
+        {
+            py::gil_scoped_release release;
+            std::unique_lock<std::mutex> lock(mutex_);
+            condition_.wait(lock, [&] { return (source_ready_ && computed_ >= count) || done_; });
+        }
+        std::lock_guard<std::mutex> guard(mutex_);
+        if (!error_.empty()) throw std::runtime_error(error_);
+        if (computed_ < count) throw std::runtime_error("seam calculation was cancelled");
+        py::array_t<uint8_t> result({height_, width_, channels_});
+        auto* pixels = result.mutable_data();
+        std::memcpy(pixels, original_.data(), original_.size());
+        for (size_t pixel = 0; pixel < ranks_.size(); ++pixel) {
+            if (ranks_[pixel] != 0 && ranks_[pixel] <= static_cast<uint32_t>(count)) {
+                const size_t offset = pixel * channels_;
+                pixels[offset] = 255;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 0;
+            }
+        }
+        return result;
+    }
+
+private:
+    py::array input_; // Retain the source without copying on the image-load path.
+    int width_ = 0, height_ = 0, channels_ = 0, total_ = 0;
+    bool horizontal_ = false;
+    mutable std::mutex mutex_;
+    mutable std::condition_variable condition_;
+    std::atomic<bool> started_{false}, cancelled_{false};
+    int computed_ = 0;
+    bool done_ = false, source_ready_ = false;
+    std::string error_;
+    std::vector<uint8_t> original_;
+    std::vector<uint32_t> ranks_;
+};
+
 py::array_t<uint8_t> process(const py::array& input, const py::object& width,
                            const py::object& height, bool highlight) {
     Image working = read_image(input);
@@ -225,4 +347,12 @@ PYBIND11_MODULE(main, m) {
         return process(image, width, height, false);
     }, py::arg("input_image").noconvert(), py::arg("new_width"), py::arg("new_height"),
     "Remove minimum-energy vertical seams, then horizontal seams, to the requested size.");
+    py::class_<SeamOrder, std::shared_ptr<SeamOrder>>(m, "SeamOrder")
+        .def(py::init<py::array, const std::string&>(), py::arg("image"), py::arg("direction"))
+        .def("compute_all", &SeamOrder::compute_all,
+             "Calculate all seams incrementally; call from a background worker.")
+        .def("cancel", &SeamOrder::cancel)
+        .def("progress", &SeamOrder::progress)
+        .def("render", &SeamOrder::render, py::arg("count"),
+             "Wait for the requested seam prefix and return its original-image preview.");
 }

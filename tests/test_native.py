@@ -1,5 +1,6 @@
 """Compare native output against exhaustive tiny-image seam enumeration."""
 import itertools
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
@@ -112,6 +113,36 @@ class NativeTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             for result in pool.map(lambda _:engine.modify(a,2,2),range(40)):
                 np.testing.assert_array_equal(result,expected)
+
+    def test_incremental_orders_match_every_final_prefix_both_directions(self):
+        rng = np.random.default_rng(72)
+        image = rng.integers(0,250,(5,6,4),dtype=np.uint8)
+        for direction, total, width_mode in [('vertical', image.shape[1]-1, True),
+                                             ('horizontal', image.shape[0]-1, False)]:
+            order = engine.SeamOrder(image, direction)
+            self.assertEqual(order.progress(), (0,total,False))
+            worker = threading.Thread(target=order.compute_all)
+            worker.start()
+            for removed in range(total+1):
+                preview = order.render(removed)
+                expected = (engine.highlight(image,image.shape[1]-removed,image.shape[0])
+                            if width_mode else engine.highlight(image,image.shape[1],image.shape[0]-removed))
+                np.testing.assert_array_equal(preview,expected)
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(order.progress(), (total,total,True))
+
+    def test_incremental_order_cancellation_wakes_waiting_preview(self):
+        image = np.random.default_rng(12).integers(0,255,(120,160,3),dtype=np.uint8)
+        order = engine.SeamOrder(image,'vertical')
+        worker = threading.Thread(target=order.compute_all)
+        worker.start()
+        order.cancel()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(order.progress()[2])
+        if order.progress()[0] == 0:
+            with self.assertRaises(RuntimeError): order.render(1)
 
 
 if __name__ == '__main__': unittest.main()

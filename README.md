@@ -35,6 +35,8 @@ Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\pytho
 
 `main.modify(image, new_width, new_height)` shrinks width first, then height by removing one minimum-energy seam at a time. Energy is the sum of absolute RGB differences between clamped left/right and up/down neighbors. Ties choose the leftmost bottom endpoint, then the leftmost predecessor while backtracking. Horizontal seams use the same rule on the transposed image.
 
+The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seam ranks incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
+
 `main.highlight` runs the same carving sequence but marks every removed pixel red at its original position and returns the original dimensions. Both functions accept nonempty NumPy uint8 RGB/RGBA arrays, including strided or read-only views; they return independent contiguous arrays and preserve alpha. Targets must be integers within the original dimensions. Invalid shapes, types, empty images, and enlargement requests raise exceptions. Native computation releases the Python GIL after copying the input.
 
 Native tests use exhaustive path enumeration on small images to verify optimal seams, exact output pixels, original-coordinate highlighting, all valid small target sizes, alpha, input validation, and array layouts.
