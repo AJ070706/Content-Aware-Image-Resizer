@@ -207,6 +207,7 @@ public:
         height_ = static_cast<int>(input_.shape(0));
         channels_ = static_cast<int>(input_.shape(2));
         total_ = (horizontal_ ? height_ : width_) - 1;
+        seam_length_ = horizontal_ ? width_ : height_;
     }
 
     void compute_all() {
@@ -220,7 +221,7 @@ public:
                 std::iota(working.origins.begin(), working.origins.end(), size_t{0});
                 {
                     std::lock_guard<std::mutex> guard(mutex_);
-                    ranks_.resize(static_cast<size_t>(width_) * height_);
+                    ordered_pixels_.resize(static_cast<size_t>(total_) * seam_length_);
                     source_ready_ = true;
                 }
                 condition_.notify_all();
@@ -228,10 +229,11 @@ public:
                 CarveWorkspace workspace;
                 for (int count = 1; count <= total_ && !cancelled_.load(); ++count) {
                     const auto seam = find_vertical_seam(working, workspace);
+                    const size_t seam_offset = static_cast<size_t>(count - 1) * seam_length_;
+                    for (int row = 0; row < working.height; ++row)
+                        ordered_pixels_[seam_offset + row] = working.origins[working.index(row, seam[row])];
                     {
                         std::lock_guard<std::mutex> guard(mutex_);
-                        for (int row = 0; row < working.height; ++row)
-                            ranks_[working.origins[working.index(row, seam[row])]] = static_cast<uint32_t>(count);
                         computed_ = count;
                     }
                     remove_vertical_seam(working, seam, workspace);
@@ -274,15 +276,21 @@ public:
             std::unique_lock<std::mutex> lock(mutex_);
             condition_.wait(lock, [&] { return (source_ready_ && computed_ >= count) || done_; });
         }
-        std::lock_guard<std::mutex> guard(mutex_);
-        if (!error_.empty()) throw std::runtime_error(error_);
-        if (computed_ < count) throw std::runtime_error("seam calculation was cancelled");
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            if (!error_.empty()) throw std::runtime_error(error_);
+            if (computed_ < count) throw std::runtime_error("seam calculation was cancelled");
+        }
         py::array_t<uint8_t> result({height_, width_, channels_});
         auto* pixels = result.mutable_data();
-        std::memcpy(pixels, original_.data(), original_.size());
-        for (size_t pixel = 0; pixel < ranks_.size(); ++pixel) {
-            if (ranks_[pixel] != 0 && ranks_[pixel] <= static_cast<uint32_t>(count)) {
-                const size_t offset = pixel * channels_;
+        {
+            // Published seam positions and the source pixels are immutable, so
+            // rendering can proceed without holding the worker's mutex.
+            py::gil_scoped_release release;
+            std::memcpy(pixels, original_.data(), original_.size());
+            const size_t seam_pixels = static_cast<size_t>(count) * seam_length_;
+            for (size_t i = 0; i < seam_pixels; ++i) {
+                const size_t offset = ordered_pixels_[i] * channels_;
                 pixels[offset] = 255;
                 pixels[offset + 1] = 0;
                 pixels[offset + 2] = 0;
@@ -293,7 +301,7 @@ public:
 
 private:
     py::array input_; // Retain the source without copying on the image-load path.
-    int width_ = 0, height_ = 0, channels_ = 0, total_ = 0;
+    int width_ = 0, height_ = 0, channels_ = 0, total_ = 0, seam_length_ = 0;
     bool horizontal_ = false;
     mutable std::mutex mutex_;
     mutable std::condition_variable condition_;
@@ -302,7 +310,7 @@ private:
     bool done_ = false, source_ready_ = false;
     std::string error_;
     std::vector<uint8_t> original_;
-    std::vector<uint32_t> ranks_;
+    std::vector<size_t> ordered_pixels_;
 };
 
 py::array_t<uint8_t> process(const py::array& input, const py::object& width,
