@@ -37,6 +37,8 @@ Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\pytho
 
 The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seams incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. The interface keeps the original image loaded and sends only a transparent red seam overlay for each preview. The combined image is rendered when saved. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
 
+Highlight seams is the active mode. Editing the target dimension updates the preview automatically; the width field and slider share one target value. Modify image is shown as unavailable until resizing is implemented.
+
 `main.highlight` runs the same carving sequence but marks every removed pixel red at its original position and returns the original dimensions. Both functions accept nonempty NumPy uint8 RGB/RGBA arrays, including strided or read-only views; they return independent contiguous arrays and preserve alpha. Targets must be integers within the original dimensions. Invalid shapes, types, empty images, and enlargement requests raise exceptions. Native computation releases the Python GIL after copying the input.
 
 Native tests use exhaustive path enumeration on small images to verify optimal seams, exact output pixels, original-coordinate highlighting, all valid small target sizes, alpha, input validation, and array layouts.

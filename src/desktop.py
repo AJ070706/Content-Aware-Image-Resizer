@@ -24,11 +24,13 @@ class ImageApi:
         self._order_ready = {'width': threading.Event(), 'height': threading.Event()}
         self._order_errors = {'width': None, 'height': None}
         self._selection = None
+        self._latest_preview_request_id = -1
 
     def _snapshot(self):
         buffer = io.BytesIO()
         self._current.save(buffer, format='PNG')
         return dict(name=self._name, width=self._current.width, height=self._current.height,
+                    generation=self._generation,
                     preview='data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
 
     def _load(self, path):
@@ -46,6 +48,7 @@ class ImageApi:
         self._order_ready = {'width': threading.Event(), 'height': threading.Event()}
         self._order_errors = {'width': None, 'height': None}
         self._selection = None
+        self._latest_preview_request_id = -1
         snapshot = self._snapshot()
         for direction in ('width', 'height'):
             threading.Thread(target=self._calculate_order,
@@ -103,15 +106,23 @@ class ImageApi:
         computed, total, done = order.progress()
         return dict(computed=computed, total=total, done=done, error=error)
 
-    def preview(self, direction, target):
+    def preview(self, direction, target, request_id=0, image_generation=None):
         with self._lock:
             if self._original is None:
                 raise ValueError('Open an image first.')
+            if image_generation is not None and image_generation != self._generation:
+                raise ValueError('The image changed before its seam preview was ready.')
             if direction not in ('width', 'height'):
                 raise ValueError('Choose either width or height adjustment.')
             maximum = self._original.width if direction == 'width' else self._original.height
             if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum:
                 raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum}.')
+            if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id < 0:
+                raise ValueError('Preview request ID must be a nonnegative whole number.')
+            if request_id < self._latest_preview_request_id:
+                raise ValueError('A newer seam preview has replaced this request.')
+            self._latest_preview_request_id = request_id
+            self._selection = None
             generation = self._generation
             ready = self._order_ready[direction]
         ready.wait()
@@ -131,6 +142,8 @@ class ImageApi:
         with self._lock:
             if generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
+            if request_id != self._latest_preview_request_id:
+                raise ValueError('A newer seam preview has replaced this request.')
             self._selection = (order, count)
             return dict(overlay=overlay)
 
