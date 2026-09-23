@@ -23,3 +23,7 @@ venv/
 *.key
 Thumbs.db
 .DS_Store
+
+# Frontend dependencies and packaging metadata
+node_modules/
+*.spec

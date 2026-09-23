@@ -1,0 +1,6 @@
+numpy==1.26.4
+Pillow==10.4.0
+pybind11==3.0.1
+setuptools==65.5.0
+pywebview>=6,<7
+pyinstaller>=6,<7
