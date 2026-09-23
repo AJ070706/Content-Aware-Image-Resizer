@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <cstddef>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -22,6 +23,13 @@ struct Image {
         return static_cast<size_t>(row) * width + col;
     }
     size_t offset(int row, int col) const { return index(row, col) * channels; }
+};
+
+struct CarveWorkspace {
+    std::vector<uint64_t> previous_cost, current_cost;
+    std::vector<int8_t> predecessor;
+    std::vector<uint8_t> pixel_scratch;
+    std::vector<size_t> origin_scratch;
 };
 
 int target_dimension(const py::object& value, int maximum, const char* name) {
@@ -60,11 +68,18 @@ Image read_image(const py::array& input) {
             std::vector<uint8_t>(contiguous.data(), contiguous.data() + count), {}};
 }
 
-std::vector<int> find_vertical_seam(const Image& image) {
+std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace) {
     const int w = image.width, h = image.height;
-    // A path can exceed 32-bit cost even though a single pixel cannot.
-    std::vector<uint64_t> cost(static_cast<size_t>(w) * h);
+    // Keep only two rows of cumulative costs and one byte of backtracking data
+    // per pixel, rather than a 64-bit cumulative-cost image per seam.
+    workspace.previous_cost.resize(w);
+    workspace.current_cost.resize(w);
+    workspace.predecessor.resize(static_cast<size_t>(w) * h);
+    auto& previous_cost = workspace.previous_cost;
+    auto& current_cost = workspace.current_cost;
+    auto& predecessor = workspace.predecessor;
     for (int row = 0; row < h; ++row) {
+        const size_t row_offset = static_cast<size_t>(row) * w;
         for (int col = 0; col < w; ++col) {
             uint64_t energy = 0;
             const auto left = image.offset(row, std::max(0, col - 1));
@@ -75,30 +90,33 @@ std::vector<int> find_vertical_seam(const Image& image) {
                 energy += std::abs(int(image.pixels[left + c]) - int(image.pixels[right + c]));
                 energy += std::abs(int(image.pixels[up + c]) - int(image.pixels[down + c]));
             }
-            if (row > 0) {
+            if (row == 0) {
+                current_cost[col] = energy;
+            } else {
                 uint64_t best = std::numeric_limits<uint64_t>::max();
-                for (int prev = std::max(0, col - 1); prev <= std::min(w - 1, col + 1); ++prev)
-                    best = std::min(best, cost[image.index(row - 1, prev)]);
-                energy += best;
+                int best_col = std::max(0, col - 1);
+                for (int prev = best_col; prev <= std::min(w - 1, col + 1); ++prev) {
+                    if (previous_cost[prev] < best) {
+                        best = previous_cost[prev];
+                        best_col = prev;
+                    }
+                }
+                current_cost[col] = energy + best;
+                predecessor[row_offset + col] = static_cast<int8_t>(best_col - col);
             }
-            cost[image.index(row, col)] = energy;
         }
+        previous_cost.swap(current_cost);
     }
     std::vector<int> seam(h);
-    auto last = cost.begin() + static_cast<size_t>(h - 1) * w;
-    seam[h - 1] = static_cast<int>(std::min_element(last, last + w) - last);
+    seam[h - 1] = static_cast<int>(std::min_element(previous_cost.begin(), previous_cost.end()) - previous_cost.begin());
     for (int row = h - 2; row >= 0; --row) {
-        const int previous = seam[row + 1];
-        int best = std::max(0, previous - 1);
-        for (int col = best + 1; col <= std::min(w - 1, previous + 1); ++col) {
-            if (cost[image.index(row, col)] < cost[image.index(row, best)]) best = col;
-        }
-        seam[row] = best; // Ties choose the leftmost predecessor.
+        const int col = seam[row + 1];
+        seam[row] = col + predecessor[static_cast<size_t>(row + 1) * w + col];
     }
     return seam;
 }
 
-void remove_vertical_seam(Image& image, const std::vector<int>& seam) {
+void remove_vertical_seam(Image& image, const std::vector<int>& seam, CarveWorkspace& workspace) {
     if (image.width <= 1 || seam.size() != static_cast<size_t>(image.height))
         throw std::invalid_argument("invalid seam dimensions");
     for (int row = 0; row < image.height; ++row) {
@@ -106,18 +124,34 @@ void remove_vertical_seam(Image& image, const std::vector<int>& seam) {
             (row > 0 && std::abs(seam[row] - seam[row - 1]) > 1))
             throw std::invalid_argument("invalid seam coordinates");
     }
-    Image next{image.width - 1, image.height, image.channels, {}, {}};
-    next.pixels.resize(static_cast<size_t>(next.width) * next.height * next.channels);
-    if (!image.origins.empty()) next.origins.resize(static_cast<size_t>(next.width) * next.height);
+    const int new_width = image.width - 1;
+    workspace.pixel_scratch.resize(static_cast<size_t>(new_width) * image.height * image.channels);
+    if (!image.origins.empty()) workspace.origin_scratch.resize(static_cast<size_t>(new_width) * image.height);
     for (int row = 0; row < image.height; ++row) {
-        for (int col = 0; col < next.width; ++col) {
-            const int old_col = col < seam[row] ? col : col + 1;
-            std::copy_n(image.pixels.data() + image.offset(row, old_col), image.channels,
-                        next.pixels.data() + next.offset(row, col));
-            if (!image.origins.empty()) next.origins[next.index(row, col)] = image.origins[image.index(row, old_col)];
+        const size_t source_pixel = image.index(row, 0);
+        const size_t target_pixel = static_cast<size_t>(row) * new_width;
+        const size_t left_pixels = static_cast<size_t>(seam[row]);
+        const size_t right_pixels = static_cast<size_t>(image.width - seam[row] - 1);
+        const size_t left_bytes = left_pixels * image.channels;
+        const size_t right_bytes = right_pixels * image.channels;
+        if (left_bytes) {
+            std::memcpy(workspace.pixel_scratch.data() + target_pixel * image.channels,
+                        image.pixels.data() + source_pixel * image.channels, left_bytes);
+            if (!image.origins.empty())
+                std::memcpy(workspace.origin_scratch.data() + target_pixel,
+                            image.origins.data() + source_pixel, left_pixels * sizeof(size_t));
+        }
+        if (right_bytes) {
+            std::memcpy(workspace.pixel_scratch.data() + (target_pixel + left_pixels) * image.channels,
+                        image.pixels.data() + (source_pixel + left_pixels + 1) * image.channels, right_bytes);
+            if (!image.origins.empty())
+                std::memcpy(workspace.origin_scratch.data() + target_pixel + left_pixels,
+                            image.origins.data() + source_pixel + left_pixels + 1, right_pixels * sizeof(size_t));
         }
     }
-    image = std::move(next); // Update width exactly once.
+    image.pixels.swap(workspace.pixel_scratch);
+    if (!image.origins.empty()) image.origins.swap(workspace.origin_scratch);
+    image.width = new_width;
 }
 
 void transpose(Image& image) {
@@ -134,9 +168,9 @@ void transpose(Image& image) {
     image = std::move(result);
 }
 
-void carve_width(Image& working, int target, std::vector<uint8_t>* marked) {
+void carve_width(Image& working, int target, std::vector<uint8_t>* marked, CarveWorkspace& workspace) {
     while (working.width > target) {
-        const auto seam = find_vertical_seam(working);
+        const auto seam = find_vertical_seam(working, workspace);
         if (marked) {
             for (int row = 0; row < working.height; ++row) {
                 const auto offset = working.origins[working.index(row, seam[row])] * working.channels;
@@ -145,7 +179,7 @@ void carve_width(Image& working, int target, std::vector<uint8_t>* marked) {
                 (*marked)[offset + 2] = 0;
             }
         }
-        remove_vertical_seam(working, seam);
+        remove_vertical_seam(working, seam, workspace);
     }
 }
 
@@ -156,6 +190,7 @@ py::array_t<uint8_t> process(const py::array& input, const py::object& width,
     const int new_height = target_dimension(height, working.height, "new_height");
     const int original_width = working.width, original_height = working.height;
     std::vector<uint8_t> marked;
+    CarveWorkspace workspace;
     {
         // The input has been copied: Python callers may keep using their arrays.
         py::gil_scoped_release release;
@@ -164,10 +199,10 @@ py::array_t<uint8_t> process(const py::array& input, const py::object& width,
             working.origins.resize(static_cast<size_t>(working.width) * working.height);
             std::iota(working.origins.begin(), working.origins.end(), size_t{0});
         }
-        carve_width(working, new_width, highlight ? &marked : nullptr);
+        carve_width(working, new_width, highlight ? &marked : nullptr, workspace);
         if (working.height != new_height) {
             transpose(working);
-            carve_width(working, new_height, highlight ? &marked : nullptr);
+            carve_width(working, new_height, highlight ? &marked : nullptr, workspace);
             transpose(working);
         }
     }
