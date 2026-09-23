@@ -4,7 +4,7 @@ A local desktop image-processing application with a React/TypeScript interface, 
 
 ## Current capabilities
 
-Open images, preview vertical and horizontal seams in red, restore the original, change preview scale, and export PNG files. Set target width and height to see all seams needed to shrink an image to that size. Preview mode does not resize the image; Save exports the original-size seam preview. Enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
+Open images, preview vertical and horizontal seams in red, restore the original, change preview scale, and export PNG files. Choose either width or height, then set its target with the number field or slider to see the seams needed to reach that size. Preview mode does not resize the image; Save exports the original-size seam preview. Enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
 
 ## Windows setup
 
@@ -35,9 +35,9 @@ Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\pytho
 
 `main.modify(image, new_width, new_height)` shrinks width first, then height by removing one minimum-energy seam at a time. Energy is the sum of absolute RGB differences between clamped left/right and up/down neighbors. Ties choose the leftmost bottom endpoint, then the leftmost predecessor while backtracking. Horizontal seams use the same rule on the transposed image.
 
-The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seams incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. The interface keeps the original image loaded and sends only a transparent red seam overlay for each preview. The combined image is rendered when saved. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
+The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seams incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. The interface keeps the original image loaded and paints seam pixels on a transparent canvas. The combined image is rendered when saved. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
 
-Highlight seams is the active mode. Editing the target dimension updates the preview automatically; the width field and slider share one target value. Modify image is shown as unavailable until resizing is implemented.
+Highlight seams is the active mode. Editing the selected target dimension updates the preview automatically; its field and slider share one target value. Modify image is shown as unavailable until resizing is implemented.
 
 The live preview tracks its current highlighted dimension and paints or erases recorded seam pixels on a transparent canvas toward the latest target. Seam pixels are fetched in small batches as they become available; the saved PNG is rendered from the same cached seam order. A calculation message appears only while the next required seam is still being computed.
 

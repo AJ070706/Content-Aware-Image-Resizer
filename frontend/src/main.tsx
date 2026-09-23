@@ -38,7 +38,7 @@ function TargetControl({ direction, maximum, value, disabled, onChange }: Target
 
   return <div className="target-control">
     <label className="field">Target {direction}<div className="inputwrap"><input aria-label={`Target ${direction}`} type="number" min="1" max={maximum} value={input} disabled={disabled} onChange={event => editInput(event.target.value)} onBlur={() => setInput(String(value))} /><span>px</span></div></label>
-    {direction === 'width' && <input className="target-slider" aria-label="Target width slider" type="range" min="1" max={maximum} step="1" value={value} disabled={disabled} onChange={event => onChange(Number(event.target.value))} />}
+    <input className="target-slider" aria-label={`Target ${direction} slider`} type="range" min="1" max={maximum} step="1" value={value} disabled={disabled} onChange={event => onChange(Number(event.target.value))} />
     <div className="hint">{disabled ? 'Load an image to choose a target size.' : `Choose between 1 and ${maximum} pixels.`}</div>
   </div>;
 }

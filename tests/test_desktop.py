@@ -46,6 +46,16 @@ class DesktopTests(unittest.TestCase):
             with Image.open(output) as image:
                 self.assertEqual(image.size,(16,12))
                 self.assertTrue(np.any(np.asarray(image)[:,:,0] == 255))
+            height_batch = api.seam_batch('height', 1, 3, opened['generation'])
+            self.assertEqual(height_batch['first'], 1)
+            self.assertGreaterEqual(len(height_batch['seams']), 1)
+            self.assertEqual(len(height_batch['seams'][0]), 16)
+            self.assertEqual(api.select_preview('height', 8, 3, opened['generation']), {'target': 8})
+            self.assertEqual(api._selection[1], 4)
+            api.save_image()
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (16, 12))
+                self.assertEqual(np.sum(np.asarray(image)[:, :, 0] == 255), 4 * 16)
             api.reset()
             self.assertTrue(np.all(np.array(api._current) == 75))
             api._window = DialogWindow(None)
