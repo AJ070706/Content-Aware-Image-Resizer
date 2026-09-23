@@ -47,15 +47,16 @@ class ImageApi:
             self._current = self._original.copy()
             return self._snapshot()
 
-    def highlight(self, width):
+    def highlight(self, width, height):
         with self._lock:
             if self._original is None:
                 raise ValueError('Open an image first.')
             if isinstance(width, bool) or not isinstance(width, int) or not 1 <= width <= self._original.width:
                 raise ValueError('Target width must be a whole number within the original image width.')
+            if isinstance(height, bool) or not isinstance(height, int) or not 1 <= height <= self._original.height:
+                raise ValueError('Target height must be a whole number within the original image height.')
             array = np.array(self._original, dtype=np.uint8)
-            # The existing engine supports vertical highlighting only.
-            self._current = Image.fromarray(engine.highlight(array, width, self._original.height))
+            self._current = Image.fromarray(engine.highlight(array, width, height))
             return self._snapshot()
 
     def save_image(self):

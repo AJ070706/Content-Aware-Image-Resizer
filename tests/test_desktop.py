@@ -23,8 +23,8 @@ class DesktopTests(unittest.TestCase):
             api._window = DialogWindow([str(source)])
             self.assertEqual(api.open_image()['width'], 16)
             for width in [0, 17, 1.5, True, '8']:
-                with self.assertRaises(ValueError): api.highlight(width)
-            result = api.highlight(12)
+                with self.assertRaises(ValueError): api.highlight(width, 12)
+            result = api.highlight(12, 8)
             self.assertEqual((result['width'],result['height']), (16,12))
             self.assertTrue(np.any(np.array(api._current)[:,:,0] == 255))
             api._window = DialogWindow(str(output))
@@ -37,7 +37,7 @@ class DesktopTests(unittest.TestCase):
             self.assertIsNone(api.save_image())
     def test_requires_image(self):
         api = ImageApi()
-        with self.assertRaises(ValueError): api.highlight(5)
+        with self.assertRaises(ValueError): api.highlight(5, 5)
         with self.assertRaises(ValueError): api.reset()
         with self.assertRaises(ValueError): api.save_image()
 

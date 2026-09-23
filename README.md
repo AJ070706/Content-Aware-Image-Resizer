@@ -4,7 +4,7 @@ A local desktop image-processing application with a React/TypeScript interface, 
 
 ## Current capabilities
 
-Open images, preview vertical seams in red, restore the original, change preview scale, and export PNG files. Processing stays on your computer. This version highlights seams; the desktop interface does not yet expose actual resizing or height adjustment. The C++ backend supports shrinking both dimensions; enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
+Open images, preview vertical and horizontal seams in red, restore the original, change preview scale, and export PNG files. Set target width and height to see all seams needed to shrink an image to that size. Preview mode does not resize the image; Save exports the original-size seam preview. Enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
 
 ## Windows setup
 
