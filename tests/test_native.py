@@ -156,5 +156,39 @@ class NativeTests(unittest.TestCase):
         if order.progress()[0] == 0:
             with self.assertRaises(RuntimeError): order.render(1)
 
+    def test_painted_guidance_changes_both_seam_directions(self):
+        image = np.full((4, 5, 3), 80, dtype=np.uint8)
+        plain = engine.SeamOrder(image, 'vertical')
+        plain.compute_all()
+        np.testing.assert_array_equal(plain.seam_positions_batch(1, 1)[0], [0, 5, 10, 15])
+
+        protect = np.zeros((4, 5), dtype=np.int8)
+        protect[:, 0] = 1
+        guided = engine.SeamOrder(image, 'vertical', protect)
+        guided.compute_all()
+        np.testing.assert_array_equal(guided.seam_positions_batch(1, 1)[0], [1, 6, 11, 16])
+
+        remove = protect.copy()
+        remove[:, 4] = -1
+        guided = engine.SeamOrder(image, 'vertical', remove)
+        guided.compute_all()
+        np.testing.assert_array_equal(guided.seam_positions_batch(1, 1)[0], [4, 9, 14, 19])
+        np.testing.assert_array_equal(guided.render_modified(1), image[:, :4])
+
+        horizontal = np.zeros((4, 5), dtype=np.int8)
+        horizontal[2, :] = -1
+        guided = engine.SeamOrder(image, 'horizontal', horizontal)
+        guided.compute_all()
+        np.testing.assert_array_equal(guided.seam_positions_batch(1, 1)[0], [10, 11, 12, 13, 14])
+        np.testing.assert_array_equal(guided.render_modified(1), image[[0, 1, 3]])
+
+        with self.assertRaises(TypeError): engine.SeamOrder(image, 'vertical', horizontal.astype(np.uint8))
+        with self.assertRaises(ValueError): engine.SeamOrder(image, 'vertical', horizontal[:3])
+        invalid = horizontal.copy()
+        invalid[0, 0] = 2
+        invalid_order = engine.SeamOrder(image, 'vertical', invalid)
+        invalid_order.compute_all()
+        with self.assertRaises(RuntimeError): invalid_order.seam_positions_batch(1, 1)
+
 
 if __name__ == '__main__': unittest.main()

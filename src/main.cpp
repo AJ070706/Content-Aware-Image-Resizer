@@ -24,6 +24,7 @@ struct Image {
     std::vector<uint8_t> pixels;
     // Original pixel indices travel with the pixels during carving/transposition.
     std::vector<size_t> origins;
+    std::vector<int8_t> mask; // +1 protects a pixel; -1 favors its removal.
 
     size_t index(int row, int col) const {
         return static_cast<size_t>(row) * width + col;
@@ -33,10 +34,11 @@ struct Image {
 
 struct CarveWorkspace {
     // Scratch buffers are reused across seams to avoid repeated large allocations.
-    std::vector<uint64_t> previous_cost, current_cost;
+    std::vector<int64_t> previous_cost, current_cost;
     std::vector<int8_t> predecessor;
     std::vector<uint8_t> pixel_scratch;
     std::vector<size_t> origin_scratch;
+    std::vector<int8_t> mask_scratch;
 };
 
 int target_dimension(const py::object& value, int maximum, const char* name) {
@@ -74,7 +76,23 @@ Image read_image(const py::array& input) {
     if (!contiguous) throw py::value_error("could not read image as a contiguous array");
     const size_t count = static_cast<size_t>(h) * w * c;
     return {static_cast<int>(w), static_cast<int>(h), static_cast<int>(c),
-            std::vector<uint8_t>(contiguous.data(), contiguous.data() + count), {}};
+            std::vector<uint8_t>(contiguous.data(), contiguous.data() + count), {}, {}};
+}
+
+std::vector<int8_t> read_mask(const py::object& input, int width, int height) {
+    if (input.is_none()) return {};
+    auto array = py::cast<py::array>(input);
+    if (!array.dtype().is(py::dtype::of<int8_t>()))
+        throw py::type_error("mask must have dtype int8");
+    if (array.ndim() != 2 || array.shape(0) != height || array.shape(1) != width)
+        throw py::value_error("mask must match image height and width");
+    auto contiguous = py::array_t<int8_t, py::array::c_style>::ensure(array);
+    if (!contiguous) throw py::value_error("could not read mask as a contiguous array");
+    const size_t count = static_cast<size_t>(height) * width;
+    std::vector<int8_t> mask(contiguous.data(), contiguous.data() + count);
+    if (std::any_of(mask.begin(), mask.end(), [](int8_t value) { return value < -1 || value > 1; }))
+        throw py::value_error("mask values must be -1, 0, or 1");
+    return mask;
 }
 
 std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace) {
@@ -92,7 +110,7 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
     for (int row = 0; row < h; ++row) {
         const size_t row_offset = static_cast<size_t>(row) * w;
         for (int col = 0; col < w; ++col) {
-            uint64_t energy = 0;
+            int64_t energy = 0;
             const auto left = image.offset(row, std::max(0, col - 1));
             const auto right = image.offset(row, std::min(w - 1, col + 1));
             const auto up = image.offset(std::max(0, row - 1), col);
@@ -101,10 +119,14 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
                 energy += std::abs(int(image.pixels[left + c]) - int(image.pixels[right + c]));
                 energy += std::abs(int(image.pixels[up + c]) - int(image.pixels[down + c]));
             }
+            if (!image.mask.empty()) {
+                const int8_t mark = image.mask[row_offset + col];
+                energy += mark > 0 ? 10000000 : mark < 0 ? -1000000 : 0;
+            }
             if (row == 0) {
                 current_cost[col] = energy;
             } else {
-                uint64_t best = std::numeric_limits<uint64_t>::max();
+                int64_t best = std::numeric_limits<int64_t>::max();
                 int best_col = std::max(0, col - 1);
                 for (int prev = best_col; prev <= std::min(w - 1, col + 1); ++prev) {
                     if (previous_cost[prev] < best) {
@@ -139,6 +161,7 @@ void remove_vertical_seam(Image& image, const std::vector<int>& seam, CarveWorks
     const int new_width = image.width - 1;
     workspace.pixel_scratch.resize(static_cast<size_t>(new_width) * image.height * image.channels);
     if (!image.origins.empty()) workspace.origin_scratch.resize(static_cast<size_t>(new_width) * image.height);
+    if (!image.mask.empty()) workspace.mask_scratch.resize(static_cast<size_t>(new_width) * image.height);
     for (int row = 0; row < image.height; ++row) {
         const size_t source_pixel = image.index(row, 0);
         const size_t target_pixel = static_cast<size_t>(row) * new_width;
@@ -152,6 +175,9 @@ void remove_vertical_seam(Image& image, const std::vector<int>& seam, CarveWorks
             if (!image.origins.empty())
                 std::memcpy(workspace.origin_scratch.data() + target_pixel,
                             image.origins.data() + source_pixel, left_pixels * sizeof(size_t));
+            if (!image.mask.empty())
+                std::memcpy(workspace.mask_scratch.data() + target_pixel,
+                            image.mask.data() + source_pixel, left_pixels);
         }
         if (right_bytes) {
             std::memcpy(workspace.pixel_scratch.data() + (target_pixel + left_pixels) * image.channels,
@@ -159,23 +185,29 @@ void remove_vertical_seam(Image& image, const std::vector<int>& seam, CarveWorks
             if (!image.origins.empty())
                 std::memcpy(workspace.origin_scratch.data() + target_pixel + left_pixels,
                             image.origins.data() + source_pixel + left_pixels + 1, right_pixels * sizeof(size_t));
+            if (!image.mask.empty())
+                std::memcpy(workspace.mask_scratch.data() + target_pixel + left_pixels,
+                            image.mask.data() + source_pixel + left_pixels + 1, right_pixels);
         }
     }
     image.pixels.swap(workspace.pixel_scratch);
     if (!image.origins.empty()) image.origins.swap(workspace.origin_scratch);
+    if (!image.mask.empty()) image.mask.swap(workspace.mask_scratch);
     image.width = new_width;
 }
 
 void transpose(Image& image) {
     // Reuse the vertical algorithm for horizontal seams without changing its tie rule.
-    Image result{image.height, image.width, image.channels, {}, {}};
+    Image result{image.height, image.width, image.channels, {}, {}, {}};
     result.pixels.resize(image.pixels.size());
     result.origins.resize(image.origins.size());
+    result.mask.resize(image.mask.size());
     for (int row = 0; row < image.height; ++row) {
         for (int col = 0; col < image.width; ++col) {
             std::copy_n(image.pixels.data() + image.offset(row, col), image.channels,
                         result.pixels.data() + result.offset(col, row));
             if (!image.origins.empty()) result.origins[result.index(col, row)] = image.origins[image.index(row, col)];
+            if (!image.mask.empty()) result.mask[result.index(col, row)] = image.mask[image.index(row, col)];
         }
     }
     image = std::move(result);
@@ -201,8 +233,8 @@ void carve_width(Image& working, int target, std::vector<uint8_t>* marked, Carve
 // this object publishes completed, immutable seam prefixes for concurrent readers.
 class SeamOrder {
 public:
-    SeamOrder(py::array input, const std::string& direction)
-        : input_(std::move(input)), horizontal_(direction == "horizontal") {
+    SeamOrder(py::array input, const std::string& direction, py::object mask)
+        : input_(std::move(input)), mask_input_(std::move(mask)), horizontal_(direction == "horizontal") {
         if (direction != "horizontal" && direction != "vertical")
             throw py::value_error("direction must be 'horizontal' or 'vertical'");
         if (!input_.dtype().is(py::dtype::of<uint8_t>()))
@@ -218,6 +250,13 @@ public:
         channels_ = static_cast<int>(input_.shape(2));
         total_ = (horizontal_ ? height_ : width_) - 1;
         seam_length_ = horizontal_ ? width_ : height_;
+        if (!mask_input_.is_none()) {
+            auto array = py::cast<py::array>(mask_input_);
+            if (!array.dtype().is(py::dtype::of<int8_t>()))
+                throw py::type_error("mask must have dtype int8");
+            if (array.ndim() != 2 || array.shape(0) != height_ || array.shape(1) != width_)
+                throw py::value_error("mask must match image height and width");
+        }
     }
 
     void compute_all() {
@@ -225,6 +264,7 @@ public:
         if (started_.exchange(true)) throw std::runtime_error("seam order calculation has already started");
         try {
             Image working = read_image(input_); // Small, one-time copy before releasing the GIL.
+            working.mask = read_mask(mask_input_, width_, height_);
             {
                 py::gil_scoped_release release;
                 original_ = working.pixels;
@@ -394,6 +434,7 @@ private:
     }
 
     py::array input_; // Retain the source without copying on the image-load path.
+    py::object mask_input_;
     int width_ = 0, height_ = 0, channels_ = 0, total_ = 0, seam_length_ = 0;
     bool horizontal_ = false;
     mutable std::mutex mutex_;
@@ -450,7 +491,7 @@ PYBIND11_MODULE(main, m) {
     }, py::arg("input_image").noconvert(), py::arg("new_width"), py::arg("new_height"),
     "Remove minimum-energy vertical seams, then horizontal seams, to the requested size.");
     py::class_<SeamOrder, std::shared_ptr<SeamOrder>>(m, "SeamOrder")
-        .def(py::init<py::array, const std::string&>(), py::arg("image"), py::arg("direction"))
+        .def(py::init<py::array, const std::string&, py::object>(), py::arg("image"), py::arg("direction"), py::arg("mask") = py::none())
         .def("compute_all", &SeamOrder::compute_all,
              "Calculate all seams incrementally; call from a background worker.")
         .def("cancel", &SeamOrder::cancel)

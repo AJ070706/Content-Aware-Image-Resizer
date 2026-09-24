@@ -6,9 +6,10 @@ A Windows desktop app that resizes images by removing low-energy seams. A React/
 
 1. Open a PNG, JPEG, WebP, BMP, or TIFF image. Vertical and horizontal seam orders begin calculating in separate background workers.
 2. Choose **Highlight seams** to mark removed pixels red, or **Modify image** to preview the resized result.
-3. Choose **Width** or **Height**, then set a target with the number field or slider. The preview moves toward that target as seams become available. Only one dimension can be adjusted at a time.
-4. In Modify mode, use **Compare with original** and its slider to reveal the original and resized previews side by side within the same image frame. Each keeps its natural aspect ratio.
-5. Save a PNG. Highlight mode saves an original-size marked image; Modify mode saves the smaller image. **Restore original** returns the selected dimension to its starting size.
+3. Optionally choose a **Protect**, **Remove**, or **Erase** brush and paint on the original image. Green makes marked pixels expensive for seams to cross; pink favors their removal. Each completed stroke restarts both background seam calculations. **Clear guidance** removes all marks.
+4. Choose **Width** or **Height**, then set a target with the number field or slider. The preview moves toward that target as seams become available. Only one dimension can be adjusted at a time.
+5. In Modify mode, use **Compare with original** and its slider to reveal the original and resized previews side by side within the same image frame. Each keeps its natural aspect ratio.
+6. Save a PNG. Highlight mode saves an original-size marked image; Modify mode saves the smaller image. **Restore original** returns the selected dimension to its starting size.
 
 The **Info** tab in the app explains the same algorithm and controls. Enlargement and simultaneous width-and-height adjustment are not supported.
 
@@ -16,11 +17,11 @@ The **Info** tab in the app explains the same algorithm and controls. Enlargemen
 
 A vertical seam contains one pixel in every row. Consecutive seam pixels may stay in the same column or move one column left or right. A horizontal seam follows the equivalent path across columns. The engine uses **backward energy**: for each pixel, it sums absolute RGB differences between its left and right neighbors and between its upper and lower neighbors. At image edges, missing neighbors are replaced with the nearest edge pixel. High-contrast detail therefore tends to have higher cost.
 
-Dynamic programming finds the connected seam with the lowest total energy. It stores the cheapest cost to reach each pixel from the previous row, chooses the cheapest bottom endpoint, then backtracks. Equal costs choose the leftmost endpoint or predecessor. The selected seam is removed, and energy is recalculated on the smaller image before the next seam. Horizontal seams use the same algorithm on a transposed image.
+Dynamic programming finds the connected seam with the lowest total energy. A painted protection pixel adds a large cost to its local energy, while a removal pixel subtracts a cost; these are strong preferences, not absolute guarantees. It stores the cheapest cost to reach each pixel from the previous row, chooses the cheapest bottom endpoint, then backtracks. Equal costs choose the leftmost endpoint or predecessor. The selected seam is removed, and energy is recalculated on the smaller image before the next seam. Horizontal seams use the same algorithm on a transposed image.
 
 After an image loads, the desktop host starts **independent** width and height calculations from the original image. Each worker publishes completed seam positions in original-image coordinates. The UI fetches those positions in small batches. Highlight mode paints or erases red marks; Modify mode compacts the surviving pixels into a new canvas. Moving the slider backward restores pixels from the cached order. Save renders the selected seam prefix in C++, so the exported pixels match the preview.
 
-This is local color-difference energy, not subject recognition, forward energy, or a protected-region mask. A low-energy seam may still cross an important subject. The native `main.modify` function can shrink both dimensions in one call, width first, but the desktop UI deliberately selects only one because its two cached seam orders were computed independently.
+This is local color-difference energy with optional user-painted guidance, not subject recognition or forward energy. A seam may still cross protected detail when no suitable path avoids it. The native `main.modify` function can shrink both dimensions in one call, width first, but the desktop UI deliberately selects only one because its two cached seam orders were computed independently.
 
 ## Project layout
 

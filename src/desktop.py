@@ -22,6 +22,7 @@ class ImageApi:
         self._window = None
         self._original = None
         self._current = None
+        self._mask = None
         self._name = ''
         self._lock = threading.Lock()
         self._generation = 0
@@ -43,32 +44,37 @@ class ImageApi:
         """Normalize an image, cancel old work, then start both seam workers."""
         with Image.open(path) as image:
             original = ImageOps.exif_transpose(image).convert('RGB')
+        self._original = original
+        self._current = original.copy()
+        self._mask = None
+        self._name = Path(path).name
+        self._start_orders()
+        return self._snapshot()
+
+    def _start_orders(self):
+        """Replace both seam orders; call while holding the image lock."""
         for order in self._orders.values():
             if order is not None:
                 order.cancel()
         self._generation += 1
         generation = self._generation
-        self._original = original
-        self._current = original.copy()
-        self._name = Path(path).name
         self._orders = {'width': None, 'height': None}
         self._order_ready = {'width': threading.Event(), 'height': threading.Event()}
         self._order_errors = {'width': None, 'height': None}
         self._selection = None
         self._latest_preview_request_id = -1
-        snapshot = self._snapshot()
         for direction in ('width', 'height'):
             threading.Thread(target=self._calculate_order,
-                             args=(generation, original, direction, self._order_ready[direction]),
+                             args=(generation, self._original, self._mask, direction,
+                                   self._order_ready[direction]),
                              name=f'{direction}-seams', daemon=True).start()
-        return snapshot
 
-    def _calculate_order(self, generation, original, direction, ready_event):
+    def _calculate_order(self, generation, original, mask, direction, ready_event):
         """Publish the native order object before computing its seams in place."""
         order = None
         try:
             array = np.ascontiguousarray(np.asarray(original, dtype=np.uint8))
-            order = engine.SeamOrder(array, 'vertical' if direction == 'width' else 'horizontal')
+            order = engine.SeamOrder(array, 'vertical' if direction == 'width' else 'horizontal', mask)
             with self._lock:
                 if generation != self._generation:
                     order.cancel()
@@ -92,6 +98,34 @@ class ImageApi:
             paths = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False,
                 file_types=('Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.tif;*.tiff)',))
             return self._load(paths[0]) if paths else None
+
+    def set_mask(self, data_url, image_generation):
+        """Replace painted guidance and restart both seam directions."""
+        prefix = 'data:image/png;base64,'
+        if not isinstance(data_url, str) or not data_url.startswith(prefix):
+            raise ValueError('The brush mask must be a PNG image.')
+        try:
+            decoded = base64.b64decode(data_url[len(prefix):], validate=True)
+            with Image.open(io.BytesIO(decoded)) as image:
+                rgba = np.asarray(image.convert('RGBA'))
+        except Exception as error:
+            raise ValueError('Could not read the brush mask.') from error
+        with self._lock:
+            if self._original is None or image_generation != self._generation:
+                raise ValueError('The image changed before the brush stroke was applied.')
+            if rgba.shape[:2] != (self._original.height, self._original.width):
+                raise ValueError('The brush mask must match the original image size.')
+            # Canvas brush edges are antialiased; ignore faint residual alpha
+            # so erasing a stroke at the same size removes all of its guidance.
+            marked = rgba[:, :, 3] >= 128
+            mask = np.zeros(rgba.shape[:2], dtype=np.int8)
+            mask[marked & (rgba[:, :, 1] > rgba[:, :, 0])] = 1
+            mask[marked & (rgba[:, :, 0] > rgba[:, :, 1])] = -1
+            self._mask = mask
+            self._start_orders()
+            return dict(generation=self._generation,
+                        protected=int(np.count_nonzero(mask == 1)),
+                        removed=int(np.count_nonzero(mask == -1)))
 
     def reset(self):
         """Clear the selected preview without restarting seam calculation."""

@@ -79,6 +79,39 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaises(ValueError): api.reset()
         with self.assertRaises(ValueError): api.save_image()
 
+    def test_brush_mask_restarts_both_orders_and_rejects_stale_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.png'
+            output = Path(directory) / 'guided.png'
+            pixels = np.full((4, 5, 3), 80, dtype=np.uint8)
+            pixels[:, 4] = 200
+            Image.fromarray(pixels).save(source)
+            api = ImageApi()
+            api._window = DialogWindow([str(source)])
+            opened = api.open_image()
+            marks = np.zeros((4, 5, 4), dtype=np.uint8)
+            marks[:, 0] = [53, 217, 133, 255]
+            marks[:, 4] = [236, 69, 92, 255]
+            buffer = io.BytesIO()
+            Image.fromarray(marks, 'RGBA').save(buffer, format='PNG')
+            data_url = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode()
+            result = api.set_mask(data_url, opened['generation'])
+            self.assertEqual((result['protected'], result['removed']), (4, 4))
+            self.assertGreater(result['generation'], opened['generation'])
+            with self.assertRaises(ValueError):
+                api.seam_batch('width', 1, 1, opened['generation'])
+            batch = api.seam_batch('width', 1, 1, result['generation'])
+            self.assertEqual(batch['seams'][0], [4, 9, 14, 19])
+            api.select_preview('width', 4, 1, result['generation'], 'modify')
+            api._window = DialogWindow(str(output))
+            api.save_image()
+            with Image.open(output) as exported:
+                self.assertEqual(exported.size, (4, 4))
+                self.assertTrue(np.all(np.asarray(exported) == 80))
+            self.assertEqual(api.preview_progress('height')['total'], 3)
+            with self.assertRaises(ValueError): api.set_mask(data_url, opened['generation'])
+            with self.assertRaises(ValueError): api.set_mask('bad data', result['generation'])
+
     def test_latest_live_preview_wins_when_requests_finish_out_of_order(self):
         started = threading.Event()
         release = threading.Event()
