@@ -305,6 +305,44 @@ public:
         return result;
     }
 
+    py::array_t<uint8_t> render_modified(int count) const {
+        wait_for_count(count);
+        const int output_width = width_ - (horizontal_ ? 0 : count);
+        const int output_height = height_ - (horizontal_ ? count : 0);
+        py::array_t<uint8_t> result({output_height, output_width, channels_});
+        auto* pixels = result.mutable_data();
+        {
+            py::gil_scoped_release release;
+            const size_t source_pixels = static_cast<size_t>(width_) * height_;
+            std::vector<uint8_t> removed(source_pixels, 0);
+            for (size_t i = 0; i < static_cast<size_t>(count) * seam_length_; ++i)
+                removed[ordered_pixels_[i]] = 1;
+            if (!horizontal_) {
+                size_t destination = 0;
+                for (size_t source = 0; source < source_pixels; ++source) {
+                    if (!removed[source]) {
+                        std::memcpy(pixels + destination * channels_,
+                                    original_.data() + source * channels_, channels_);
+                        ++destination;
+                    }
+                }
+            } else {
+                std::vector<int> destination_row(width_, 0);
+                for (int row = 0; row < height_; ++row) {
+                    for (int col = 0; col < width_; ++col) {
+                        const size_t source = static_cast<size_t>(row) * width_ + col;
+                        if (!removed[source]) {
+                            const size_t destination = static_cast<size_t>(destination_row[col]++) * width_ + col;
+                            std::memcpy(pixels + destination * channels_,
+                                        original_.data() + source * channels_, channels_);
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
     py::array_t<uint64_t> seam_positions_batch(int first, int limit) const {
         if (first < 1 || first > total_ || limit < 1)
             throw py::value_error("requested seam batch is outside the available image dimension");
@@ -407,6 +445,8 @@ PYBIND11_MODULE(main, m) {
              "Wait for the requested seam prefix and return its original-image preview.")
         .def("render_overlay", &SeamOrder::render_overlay, py::arg("count"),
              "Wait for the requested seam prefix and return a transparent red overlay.")
+        .def("render_modified", &SeamOrder::render_modified, py::arg("count"),
+             "Wait for the requested seam prefix and return the resized image.")
         .def("seam_positions_batch", &SeamOrder::seam_positions_batch,
              py::arg("first"), py::arg("limit"),
              "Wait for the first requested seam and return published pixel positions.");

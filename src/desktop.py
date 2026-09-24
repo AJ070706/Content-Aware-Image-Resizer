@@ -134,12 +134,14 @@ class ImageApi:
                 raise ValueError('The image changed before its seam preview was ready.')
         return dict(first=first, seams=seams)
 
-    def select_preview(self, direction, target, request_id, image_generation):
+    def select_preview(self, direction, target, request_id, image_generation, mode='highlight'):
         with self._lock:
             if self._original is None or image_generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
             if direction not in ('width', 'height'):
                 raise ValueError('Choose either width or height adjustment.')
+            if mode not in ('highlight', 'modify'):
+                raise ValueError('Choose either Highlight seams or Modify image mode.')
             maximum = self._original.width if direction == 'width' else self._original.height
             if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum:
                 raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum}.')
@@ -159,7 +161,7 @@ class ImageApi:
                 raise ValueError('The image changed before its seam preview was ready.')
             if request_id != self._latest_preview_request_id:
                 raise ValueError('A newer seam preview has replaced this request.')
-            self._selection = (order, count) if count else None
+            self._selection = (order, count, mode)
         return dict(target=target)
 
     def preview(self, direction, target, request_id=0, image_generation=None):
@@ -200,21 +202,28 @@ class ImageApi:
                 raise ValueError('The image changed before its seam preview was ready.')
             if request_id != self._latest_preview_request_id:
                 raise ValueError('A newer seam preview has replaced this request.')
-            self._selection = (order, count)
+            self._selection = (order, count, 'highlight')
             return dict(overlay=overlay)
 
     def save_image(self):
         with self._lock:
             if self._current is None:
                 raise ValueError('Open an image first.')
+            selection = self._selection
+            suffix = '-modified.png' if selection and selection[2] == 'modify' else '-seams.png'
             path = self._window.create_file_dialog(webview.FileDialog.SAVE,
-                save_filename=Path(self._name).stem + '-seams.png', file_types=('PNG (*.png)',))
+                save_filename=Path(self._name).stem + suffix, file_types=('PNG (*.png)',))
             if not path:
                 return None
             path = Path(path[0] if isinstance(path, (list, tuple)) else path)
             if path.suffix.lower() != '.png':
                 path = path.with_suffix('.png')
-            image = Image.fromarray(self._selection[0].render(self._selection[1])) if self._selection else self._current
+            if selection and selection[1]:
+                order, count, mode = selection
+                array = order.render_modified(count) if mode == 'modify' else order.render(count)
+                image = Image.fromarray(array)
+            else:
+                image = self._current
             image.save(path, format='PNG')
             return str(path)
 

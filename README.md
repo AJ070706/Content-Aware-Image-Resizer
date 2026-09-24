@@ -1,10 +1,10 @@
 # ImageResizer
 
-A local desktop image-processing application with a React/TypeScript interface, a Python desktop host, and a C++ seam-highlighting engine.
+A local desktop image-processing application with a React/TypeScript interface, a Python desktop host, and a C++ seam-carving engine.
 
 ## Current capabilities
 
-Open images, preview vertical and horizontal seams in red, restore the original, change preview scale, and export PNG files. Choose either width or height, then set its target with the number field or slider to see the seams needed to reach that size. Preview mode does not resize the image; Save exports the original-size seam preview. Enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
+Open images, highlight or remove vertical and horizontal seams, restore the original, change preview scale, and export PNG files. Choose either width or height, then set its target with the number field or slider. Highlight seams shows red marks and saves an original-size PNG; Modify image previews and saves the resized PNG. Width and height are adjusted separately, and enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
 
 ## Windows setup
 
@@ -35,11 +35,11 @@ Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\pytho
 
 `main.modify(image, new_width, new_height)` shrinks width first, then height by removing one minimum-energy seam at a time. Energy is the sum of absolute RGB differences between clamped left/right and up/down neighbors. Ties choose the leftmost bottom endpoint, then the leftmost predecessor while backtracking. Horizontal seams use the same rule on the transposed image.
 
-The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seams incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. The interface keeps the original image loaded and paints seam pixels on a transparent canvas. The combined image is rendered when saved. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
+The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seams incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. Highlight mode paints seam pixels on a transparent canvas over the original image. Modify mode compacts the remaining pixels into a resized canvas; saving uses the same cached seam order in the native engine. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
 
-Highlight seams is the active mode. Editing the selected target dimension updates the preview automatically; its field and slider share one target value. Modify image is shown as unavailable until resizing is implemented.
+Editing the selected target dimension updates either mode automatically; its field and slider share one target value. Switching modes keeps that target, while switching dimensions returns the target to the original size.
 
-The live preview tracks its current highlighted dimension and paints or erases recorded seam pixels on a transparent canvas toward the latest target. Seam pixels are fetched in small batches as they become available; the saved PNG is rendered from the same cached seam order. A calculation message appears only while the next required seam is still being computed.
+The live preview tracks the current size and moves toward the latest target one seam at a time. Seam pixels are fetched in small batches as they become available. Highlight mode paints or erases red seam pixels; Modify mode removes or restores those pixels and compacts the image. The saved PNG is rendered from the same cached seam order. A calculation message appears only while the next required seam is still being computed.
 
 `main.highlight` runs the same carving sequence but marks every removed pixel red at its original position and returns the original dimensions. Both functions accept nonempty NumPy uint8 RGB/RGBA arrays, including strided or read-only views; they return independent contiguous arrays and preserve alpha. Targets must be integers within the original dimensions. Invalid shapes, types, empty images, and enlargement requests raise exceptions. Native computation releases the Python GIL after copying the input.
 

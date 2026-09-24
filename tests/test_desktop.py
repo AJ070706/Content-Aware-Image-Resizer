@@ -56,6 +56,16 @@ class DesktopTests(unittest.TestCase):
             with Image.open(output) as image:
                 self.assertEqual(image.size, (16, 12))
                 self.assertEqual(np.sum(np.asarray(image)[:, :, 0] == 255), 4 * 16)
+            self.assertEqual(api.select_preview('width', 12, 4, opened['generation'], 'modify'), {'target': 12})
+            api.save_image()
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (12, 12))
+                self.assertTrue(np.all(np.asarray(image) == 75))
+            self.assertEqual(api.select_preview('height', 8, 5, opened['generation'], 'modify'), {'target': 8})
+            api.save_image()
+            with Image.open(output) as image:
+                self.assertEqual(image.size, (16, 8))
+                self.assertTrue(np.all(np.asarray(image) == 75))
             api.reset()
             self.assertTrue(np.all(np.array(api._current) == 75))
             api._window = DialogWindow(None)

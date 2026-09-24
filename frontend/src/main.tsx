@@ -11,7 +11,7 @@ type Api = {
   open_image: () => Promise<Picture | null>;
   reset: () => Promise<Picture>;
   seam_batch: (direction: Direction, first: number, limit: number, generation: number) => Promise<SeamBatch>;
-  select_preview: (direction: Direction, target: number, requestId: number, generation: number) => Promise<{ target: number }>;
+  select_preview: (direction: Direction, target: number, requestId: number, generation: number, mode: Mode) => Promise<{ target: number }>;
   preview_progress: (direction: Direction) => Promise<Progress>;
   save_image: () => Promise<string | null>;
 };
@@ -60,6 +60,50 @@ function paintSeam(canvas: HTMLCanvasElement, pixels: number[], width: number, a
   }
 }
 
+function loadOriginalPixels(pic: Picture): Promise<Uint32Array> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = pic.width;
+      canvas.height = pic.height;
+      const context = canvas.getContext('2d');
+      if (!context) { reject(new Error('The image preview canvas is unavailable.')); return; }
+      context.drawImage(image, 0, 0);
+      resolve(new Uint32Array(context.getImageData(0, 0, pic.width, pic.height).data.buffer));
+    };
+    image.onerror = () => reject(new Error('Could not load the image for modification.'));
+    image.src = pic.preview;
+  });
+}
+
+function drawModified(canvas: HTMLCanvasElement, original: Uint32Array, removed: Uint8Array,
+  width: number, height: number, direction: Direction, count: number) {
+  const outputWidth = width - (direction === 'width' ? count : 0);
+  const outputHeight = height - (direction === 'height' ? count : 0);
+  if (canvas.width !== outputWidth) canvas.width = outputWidth;
+  if (canvas.height !== outputHeight) canvas.height = outputHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('The image preview canvas is unavailable.');
+  const image = context.createImageData(outputWidth, outputHeight);
+  const output = new Uint32Array(image.data.buffer);
+  if (direction === 'width') {
+    let destination = 0;
+    for (let source = 0; source < original.length; source++) {
+      if (!removed[source]) output[destination++] = original[source];
+    }
+  } else {
+    const destinationRows = new Uint32Array(width);
+    for (let source = 0; source < original.length; source++) {
+      if (!removed[source]) {
+        const column = source % width;
+        output[destinationRows[column]++ * width + column] = original[source];
+      }
+    }
+  }
+  context.putImageData(image, 0, 0);
+}
+
 function nextFrame() {
   return new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
 }
@@ -72,6 +116,8 @@ function App() {
   const drawnCountRef = useRef(0);
   const imageGenerationRef = useRef<number | null>(null);
   const seamCacheRef = useRef<Record<Direction, Map<number, number[]>>>({ width: new Map(), height: new Map() });
+  const removedPixelsRef = useRef<Uint8Array | null>(null);
+  const originalPixelsRef = useRef<{ generation: number; pixels: Promise<Uint32Array> } | null>(null);
   const [mode, setMode] = useState<Mode>('highlight');
   const [direction, setDirection] = useState<Direction>('width');
   const [target, setTarget] = useState(1);
@@ -96,6 +142,8 @@ function App() {
   const targetCount = maximum - target;
   const waitingForCalculation = pending && targetCount > maximum - displayedSize &&
     progress !== null && !progress.done && progress.computed < maximum - displayedSize + 1;
+  const previewWidth = pic ? (mode === 'modify' && direction === 'width' ? displayedSize : pic.width) : 0;
+  const previewHeight = pic ? (mode === 'modify' && direction === 'height' ? displayedSize : pic.height) : 0;
 
   useLayoutEffect(() => {
     if (!pic || !canvasRef.current) return;
@@ -103,12 +151,13 @@ function App() {
     canvas.width = pic.width;
     canvas.height = pic.height;
     drawnCountRef.current = 0;
+    removedPixelsRef.current = new Uint8Array(pic.width * pic.height);
     setDisplayedSize(direction === 'width' ? pic.width : pic.height);
     if (imageGenerationRef.current !== pic.generation) {
       seamCacheRef.current = { width: new Map(), height: new Map() };
       imageGenerationRef.current = pic.generation;
     }
-  }, [pic?.generation, direction]);
+  }, [pic?.generation, direction, mode]);
 
   useEffect(() => {
     if (!pending || !ready) return;
@@ -129,7 +178,7 @@ function App() {
   }, [pending, direction, ready]);
 
   useEffect(() => {
-    if (!ready || !pic || mode !== 'highlight' || requestId === 0) return;
+    if (!ready || !pic || requestId === 0) return;
     let active = true;
     const api = window.pywebview!.api;
     const cache = seamCacheRef.current[direction];
@@ -137,6 +186,15 @@ function App() {
     const fullSize = direction === 'width' ? pic.width : pic.height;
     const run = async () => {
       try {
+        let original: Uint32Array | null = null;
+        if (mode === 'modify') {
+          if (originalPixelsRef.current?.generation !== pic.generation) {
+            originalPixelsRef.current = { generation: pic.generation, pixels: loadOriginalPixels(pic) };
+          }
+          original = await originalPixelsRef.current.pixels;
+          if (!active || requestId !== requestIdRef.current) return;
+          drawModified(canvasRef.current!, original, removedPixelsRef.current!, pic.width, pic.height, direction, drawnCountRef.current);
+        }
         while (active && requestId === requestIdRef.current && drawnCountRef.current !== desiredCount) {
           const gap = Math.abs(desiredCount - drawnCountRef.current);
           const stepsThisFrame = Math.min(12, Math.max(1, Math.ceil(gap / 20)));
@@ -154,25 +212,28 @@ function App() {
                 pixels = cache.get(next);
                 if (!pixels) throw new Error('The requested seam was not returned.');
               }
-              paintSeam(canvasRef.current!, pixels, pic.width, true);
+              if (mode === 'highlight') paintSeam(canvasRef.current!, pixels, pic.width, true);
+              else for (const pixel of pixels) removedPixelsRef.current![pixel] = 1;
               drawnCountRef.current = next;
             } else {
               const pixels = cache.get(current);
-              if (!pixels) throw new Error('A highlighted seam is missing from the cache.');
-              paintSeam(canvasRef.current!, pixels, pic.width, false);
+              if (!pixels) throw new Error('A calculated seam is missing from the cache.');
+              if (mode === 'highlight') paintSeam(canvasRef.current!, pixels, pic.width, false);
+              else for (const pixel of pixels) removedPixelsRef.current![pixel] = 0;
               drawnCountRef.current = current - 1;
             }
             steps += 1;
           }
+          if (mode === 'modify') drawModified(canvasRef.current!, original!, removedPixelsRef.current!, pic.width, pic.height, direction, drawnCountRef.current);
           setDisplayedSize(fullSize - drawnCountRef.current);
           await nextFrame();
         }
         if (!active || requestId !== requestIdRef.current) return;
-        await api.select_preview(direction, target, requestId, pic.generation);
+        await api.select_preview(direction, target, requestId, pic.generation, mode);
         if (!active || requestId !== requestIdRef.current) return;
         setPreviewFailed(false);
         setSettledId(requestId);
-        setMessage(`${direction === 'width' ? 'Vertical' : 'Horizontal'} seam preview ready.`);
+        setMessage(mode === 'modify' ? 'Modified image preview ready.' : `${direction === 'width' ? 'Vertical' : 'Horizontal'} seam preview ready.`);
       } catch (reason) {
         if (!active || requestId !== requestIdRef.current) return;
         setError(reason instanceof Error ? reason.message : String(reason));
@@ -223,6 +284,12 @@ function App() {
     requestPreview();
   };
 
+  const chooseMode = (next: Mode) => {
+    if (!pic || busy || next === mode) return;
+    setMode(next);
+    requestPreview();
+  };
+
   const changeTarget = (next: number) => {
     if (!pic || busy || next === target) return;
     setTarget(next);
@@ -244,9 +311,9 @@ function App() {
     <main><section className="workspace">
       <div className="canvasbar"><span>{pic?.name ?? 'Your workspace'}</span><label>View <select value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">Fit to window</option><option value="1">100%</option><option value="0.5">50%</option><option value="0.25">25%</option></select></label></div>
       <div className={'canvas ' + (zoom === 'fit' ? 'fit' : 'actual')} aria-busy={busy || pending}>
-        {pic ? <div className="image-stage" style={zoom === 'fit' ? {} : { width: pic.width * Number(zoom), height: pic.height * Number(zoom) }}>
-          <img className="base-image" alt="Image preview" src={pic.preview} />
-          <canvas className="seam-overlay" aria-hidden="true" ref={canvasRef} width={pic.width} height={pic.height} />
+        {pic ? <div className="image-stage" style={zoom === 'fit' ? {} : { width: previewWidth * Number(zoom), height: previewHeight * Number(zoom) }}>
+          {mode === 'highlight' && <img className="base-image" alt="Image preview" src={pic.preview} />}
+          <canvas className="seam-overlay" aria-hidden={mode === 'highlight'} role={mode === 'modify' ? 'img' : undefined} aria-label={mode === 'modify' ? 'Modified image preview' : undefined} ref={canvasRef} width={pic.width} height={pic.height} />
         </div>
           : <div className="empty"><span className="emptyicon">▧</span><h1>A new perspective<br />on your images.</h1><p>Explore the seams that shape an image.<br />Everything stays on your computer.</p><button className="primary" disabled={!ready || busy} onClick={open}>Choose an image</button><small>PNG · JPEG · WEBP · BMP · TIFF</small></div>}
       </div>
@@ -255,8 +322,8 @@ function App() {
       <div className="dimensions"><span>Original dimensions</span><strong>{pic ? `${pic.width} × ${pic.height}` : '— × —'} <small>px</small></strong></div>
       <div className="field">Mode</div>
       <div className="mode-toggle" role="group" aria-label="Image mode">
-        <button aria-pressed={mode === 'highlight'} className={mode === 'highlight' ? 'selected' : ''} onClick={() => setMode('highlight')}>Highlight seams</button>
-        <button disabled title="Modify image is coming later">Modify image</button>
+        <button aria-pressed={mode === 'highlight'} disabled={!pic || busy} className={mode === 'highlight' ? 'selected' : ''} onClick={() => chooseMode('highlight')}>Highlight seams</button>
+        <button aria-pressed={mode === 'modify'} disabled={!pic || busy} className={mode === 'modify' ? 'selected' : ''} onClick={() => chooseMode('modify')}>Modify image</button>
       </div>
       <div className="field">Adjust one direction at a time</div>
       <div className="direction-toggle" role="group" aria-label="Dimension to adjust">
@@ -264,11 +331,11 @@ function App() {
         <button aria-pressed={direction === 'height'} disabled={!pic || busy} className={direction === 'height' ? 'selected' : ''} onClick={() => chooseDirection('height')}>Height</button>
       </div>
       <TargetControl direction={direction} maximum={maximum || 1} value={target} disabled={!pic || busy} onChange={changeTarget} />
-      {pending && <div className="hint progress" role="status">{waitingForCalculation && progress ? `Calculating ${direction} seams: ${progress.computed} of ${progress.total}` : `Highlighted ${direction}: ${displayedSize} px → ${target} px`}</div>}
+      {pending && <div className="hint progress" role="status">{waitingForCalculation && progress ? `Calculating ${direction} seams: ${progress.computed} of ${progress.total}` : `${mode === 'modify' ? 'Resized' : 'Highlighted'} ${direction}: ${displayedSize} px → ${target} px`}</div>}
       <button className="full quiet" disabled={!pic || busy} onClick={reset}>Restore original</button>
-      <div className="note"><span className="dot" /> Preview mode<p>Red marks show the selected seam direction. The other direction is calculated simultaneously. Saving exports the original-size image with seams highlighted.</p></div>
+      <div className="note"><span className="dot" /> {mode === 'modify' ? 'Modify mode' : 'Highlight mode'}<p>{mode === 'modify' ? 'Seams are removed from the selected dimension. Saving exports the resized image.' : 'Red marks show the selected seam direction. Saving exports the original-size image with seams highlighted.'} The other direction is calculated simultaneously.</p></div>
     </aside></main>
-    <footer><span role={error ? 'alert' : 'status'} className={error ? 'error' : ''}>{error || (!ready ? 'Connecting to the desktop app…' : busy ? 'Working…' : pending ? (waitingForCalculation ? 'Waiting for the next seam to calculate…' : 'Updating highlighted seams…') : message)}</span><span>LOCAL PROCESSING</span></footer>
+    <footer><span role={error ? 'alert' : 'status'} className={error ? 'error' : ''}>{error || (!ready ? 'Connecting to the desktop app…' : busy ? 'Working…' : pending ? (waitingForCalculation ? 'Waiting for the next seam to calculate…' : mode === 'modify' ? 'Updating resized image…' : 'Updating highlighted seams…') : message)}</span><span>LOCAL PROCESSING</span></footer>
   </div>;
 }
 
