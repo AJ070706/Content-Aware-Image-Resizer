@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { InfoView } from './InfoView';
+import { BrushMask, type MaskBounds, type MaskChange, type MaskMark, type MaskPoint } from './brushMask';
 import './style.css';
 
 // The desktop bridge supplies immutable seam positions; this file owns the live canvas preview.
@@ -118,6 +119,25 @@ function nextFrame() {
   return new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
 }
 
+/** Copy the canonical mask into a canvas region with fully opaque, flat colors. */
+function drawMask(canvas: HTMLCanvasElement, mask: BrushMask, bounds: MaskBounds) {
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('The brush canvas is unavailable.');
+  const image = context.createImageData(bounds.right - bounds.left, bounds.bottom - bounds.top);
+  for (let y = bounds.top; y < bounds.bottom; y++) {
+    for (let x = bounds.left; x < bounds.right; x++) {
+      const mark = mask.pixels[y * mask.width + x];
+      if (!mark) continue;
+      const offset = ((y - bounds.top) * image.width + x - bounds.left) * 4;
+      image.data[offset] = mark === 1 ? 53 : 236;
+      image.data[offset + 1] = mark === 1 ? 217 : 69;
+      image.data[offset + 2] = mark === 1 ? 133 : 92;
+      image.data[offset + 3] = 255;
+    }
+  }
+  context.putImageData(image, bounds.left, bounds.top);
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('workspace');
   const [ready, setReady] = useState(!!window.pywebview?.api);
@@ -125,7 +145,9 @@ function App() {
   const [pic, setPic] = useState<Picture | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const paintingRef = useRef<{ pointerId: number; x: number; y: number; changed: boolean; before: ImageData } | null>(null);
+  const maskRef = useRef<BrushMask | null>(null);
+  const maskSavingRef = useRef(false);
+  const paintingRef = useRef<{ pointerId: number; point: MaskPoint; mark: MaskMark; diameter: number; changes: MaskChange[] } | null>(null);
   const drawnCountRef = useRef(0);
   const imageGenerationRef = useRef<number | null>(null);
   const seamCacheRef = useRef<Record<Direction, Map<number, number[]>>>({ width: new Map(), height: new Map() });
@@ -292,6 +314,7 @@ function App() {
     requestIdRef.current += 1;
     const maskCanvas = maskCanvasRef.current;
     if (maskCanvas) maskCanvas.getContext('2d')?.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskRef.current = new BrushMask(image.width, image.height);
     paintingRef.current = null;
     setPic(image);
     setDirection('width');
@@ -319,42 +342,38 @@ function App() {
     requestPreview();
   }
 
-  function maskPoint(event: React.PointerEvent<HTMLCanvasElement>) {
+  function maskPoint(event: React.PointerEvent<HTMLCanvasElement>, clampToImage = false) {
     const canvas = maskCanvasRef.current;
     if (!canvas || !pic) return null;
     const rect = canvas.getBoundingClientRect();
     const scale = Math.min(rect.width / pic.width, rect.height / pic.height);
     const x = (event.clientX - rect.left - (rect.width - pic.width * scale) / 2) / scale;
     const y = (event.clientY - rect.top - (rect.height - pic.height * scale) / 2) / scale;
-    return x >= 0 && y >= 0 && x < pic.width && y < pic.height ? { x, y } : null;
+    if (!clampToImage && (x < 0 || y < 0 || x >= pic.width || y >= pic.height)) return null;
+    return { x: Math.max(0, Math.min(pic.width, x)), y: Math.max(0, Math.min(pic.height, y)) };
   }
 
-  function paintMask(from: { x: number; y: number }, to: { x: number; y: number }) {
+  function paintMask(stroke: NonNullable<typeof paintingRef.current>, to: MaskPoint) {
     const canvas = maskCanvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!context || brushTool === 'off') return;
+    const mask = maskRef.current;
+    if (!canvas || !mask) return;
+    const from = stroke.point;
     const distance = Math.hypot(to.x - from.x, to.y - from.y);
-    const steps = Math.max(1, Math.ceil(distance / Math.max(1, brushSize / 3)));
-    context.save();
-    for (let step = 0; step <= steps; step++) {
-      const x = from.x + (to.x - from.x) * step / steps;
-      const y = from.y + (to.y - from.y) * step / steps;
-      context.beginPath();
-      context.arc(x, y, brushSize / 2, 0, Math.PI * 2);
-      context.globalCompositeOperation = 'destination-out';
-      context.fill();
-      if (brushTool !== 'erase') {
-        context.globalCompositeOperation = 'source-over';
-        context.fillStyle = brushTool === 'protect' ? '#35d985' : '#ec455c';
-        context.fill();
-      }
+    const chunks = Math.max(1, Math.ceil(distance / 64));
+    for (let chunk = 0; chunk < chunks; chunk++) {
+      const start = { x: from.x + (to.x - from.x) * chunk / chunks, y: from.y + (to.y - from.y) * chunk / chunks };
+      const end = { x: from.x + (to.x - from.x) * (chunk + 1) / chunks, y: from.y + (to.y - from.y) * (chunk + 1) / chunks };
+      const { changes, bounds } = mask.paint(start, end, stroke.diameter, stroke.mark);
+      if (bounds) drawMask(canvas, mask, bounds);
+      for (const change of changes) stroke.changes.push(change);
     }
-    context.restore();
+    stroke.point = to;
   }
 
-  async function commitMask(before: ImageData) {
+  async function commitMask(undo: () => void) {
     const canvas = maskCanvasRef.current;
     if (!canvas || !pic || !window.pywebview?.api) return;
+    maskSavingRef.current = true;
     setBusy(true);
     setError('');
     try {
@@ -369,31 +388,34 @@ function App() {
       setMaskCount({ protected: result.protected, removed: result.removed });
       setMessage('Brush guidance updated. Both seam directions are recalculating.');
     } catch (reason) {
-      canvas.getContext('2d')?.putImageData(before, 0, 0);
+      undo();
+      const mask = maskRef.current;
+      if (mask) {
+        drawMask(canvas, mask, { left: 0, top: 0, right: mask.width, bottom: mask.height });
+        setMaskCount({ protected: mask.protectedCount, removed: mask.removedCount });
+      }
       setError(reason instanceof Error ? reason.message : String(reason));
-    } finally { setBusy(false); }
+    } finally { maskSavingRef.current = false; setBusy(false); }
   }
 
   function startPainting(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (brushTool === 'off' || busy || event.button !== 0) return;
+    if (brushTool === 'off' || busy || maskSavingRef.current || paintingRef.current || event.button !== 0) return;
     const point = maskPoint(event);
     const canvas = maskCanvasRef.current;
-    const context = canvas?.getContext('2d');
-    if (!point || !canvas || !context) return;
+    if (!point || !canvas || !maskRef.current) return;
     canvas.setPointerCapture(event.pointerId);
-    paintingRef.current = { pointerId: event.pointerId, ...point, changed: true,
-      before: context.getImageData(0, 0, canvas.width, canvas.height) };
-    paintMask(point, point);
+    const mark: MaskMark = brushTool === 'protect' ? 1 : brushTool === 'remove' ? 2 : 0;
+    const stroke = { pointerId: event.pointerId, point, mark, diameter: brushSize, changes: [] as MaskChange[] };
+    paintingRef.current = stroke;
+    paintMask(stroke, point);
   }
 
   function continuePainting(event: React.PointerEvent<HTMLCanvasElement>) {
     const stroke = paintingRef.current;
     if (!stroke || stroke.pointerId !== event.pointerId) return;
-    const point = maskPoint(event);
+    const point = maskPoint(event, true);
     if (!point) return;
     paintMask(stroke, point);
-    stroke.x = point.x;
-    stroke.y = point.y;
   }
 
   function finishPainting(event: React.PointerEvent<HTMLCanvasElement>) {
@@ -403,16 +425,35 @@ function App() {
     paintingRef.current = null;
     const canvas = maskCanvasRef.current;
     if (canvas?.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
-    if (stroke.changed) void commitMask(stroke.before);
+    if (stroke.changes.length) {
+      const mask = maskRef.current!;
+      setMaskCount({ protected: mask.protectedCount, removed: mask.removedCount });
+      void commitMask(() => mask.restore(stroke.changes));
+    }
+  }
+
+  function cancelPainting(event: React.PointerEvent<HTMLCanvasElement>) {
+    const stroke = paintingRef.current;
+    if (!stroke || stroke.pointerId !== event.pointerId) return;
+    paintingRef.current = null;
+    const canvas = maskCanvasRef.current;
+    if (canvas?.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+    const mask = maskRef.current;
+    if (mask && canvas && stroke.changes.length) {
+      mask.restore(stroke.changes);
+      drawMask(canvas, mask, { left: 0, top: 0, right: mask.width, bottom: mask.height });
+    }
   }
 
   function clearMask() {
     const canvas = maskCanvasRef.current;
     const context = canvas?.getContext('2d');
-    if (!canvas || !context || busy || !pic) return;
-    const before = context.getImageData(0, 0, canvas.width, canvas.height);
+    const oldMask = maskRef.current;
+    if (!canvas || !context || busy || maskSavingRef.current || !pic || !oldMask || (!oldMask.protectedCount && !oldMask.removedCount)) return;
+    maskRef.current = new BrushMask(pic.width, pic.height);
     context.clearRect(0, 0, canvas.width, canvas.height);
-    void commitMask(before);
+    setMaskCount({ protected: 0, removed: 0 });
+    void commitMask(() => { maskRef.current = oldMask; });
   }
 
   const chooseDirection = (next: Direction) => {
@@ -469,7 +510,7 @@ function App() {
         {pic ? <div className={'image-stage' + (comparing ? ' comparing' : '')} style={zoom === 'fit' ? {} : { width: (comparing ? pic.width : previewWidth) * Number(zoom), height: (comparing ? pic.height : previewHeight) * Number(zoom) }}>
           {(mode === 'highlight' || comparing) && <img className="base-image" alt="Original image" src={pic.preview} />}
           <canvas className="seam-overlay" aria-hidden={mode === 'highlight'} role={mode === 'modify' ? 'img' : undefined} aria-label={mode === 'modify' ? 'Modified image preview' : undefined} ref={canvasRef} width={pic.width} height={pic.height} style={comparing ? { clipPath: `inset(0 ${100 - comparison}% 0 0)` } : undefined} />
-          <canvas className={'mask-overlay' + (brushTool !== 'off' ? ' painting' : '')} aria-label="Paint seam guidance" ref={maskCanvasRef} width={pic.width} height={pic.height} style={{ display: mode === 'highlight' ? undefined : 'none' }} onPointerDown={startPainting} onPointerMove={continuePainting} onPointerUp={finishPainting} onPointerCancel={finishPainting} />
+          <canvas className={'mask-overlay' + (brushTool !== 'off' ? ' painting' : '')} aria-label="Paint seam guidance" ref={maskCanvasRef} width={pic.width} height={pic.height} style={{ display: mode === 'highlight' ? undefined : 'none' }} onPointerDown={startPainting} onPointerMove={continuePainting} onPointerUp={finishPainting} onPointerCancel={cancelPainting} />
           {comparing && <div className="comparison-divider" style={{ left: `${comparison}%` }} aria-hidden="true" />}
         </div>
           : <div className="empty"><span className="emptyicon">▧</span><h1>A new perspective<br />on your images.</h1><p>Explore the seams that shape an image.<br />Everything stays on your computer.</p><button className="primary" disabled={!ready || busy} onClick={open}>Choose an image</button><small>PNG · JPEG · WEBP · BMP · TIFF</small></div>}
@@ -498,7 +539,7 @@ function App() {
           <button aria-pressed={brushTool === 'erase'} disabled={!pic || busy} className={brushTool === 'erase' ? 'selected' : ''} onClick={() => chooseBrush('erase')}>Erase</button>
         </div>
         <label className="brush-size">Brush size <input aria-label="Brush size" type="range" min="2" max="80" value={brushSize} disabled={!pic || busy} onChange={event => setBrushSize(Number(event.target.value))} /><span>{brushSize}px</span></label>
-        <div className="mask-count">Protected: {maskCount.protected} px · Removal: {maskCount.removed} px</div>
+        <div className="mask-count">Original image pixels · Protected: {maskCount.protected} · Removal: {maskCount.removed}</div>
         <button className="full quiet" disabled={!pic || busy || (!maskCount.protected && !maskCount.removed)} onClick={clearMask}>Clear guidance</button>
       </div>
       <div className="note"><span className="dot" /> {mode === 'modify' ? 'Modify mode' : 'Highlight mode'}<p>{mode === 'modify' ? 'Seams are removed from the selected dimension. Saving exports the resized image.' : 'Red marks show the selected seam direction. Saving exports the original-size image with seams highlighted.'} The other direction is calculated simultaneously.</p></div>
