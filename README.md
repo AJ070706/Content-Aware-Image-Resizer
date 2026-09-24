@@ -7,7 +7,8 @@ A Windows desktop app that resizes images by removing low-energy seams. A React/
 1. Open a PNG, JPEG, WebP, BMP, or TIFF image. Vertical and horizontal seam orders begin calculating in separate background workers.
 2. Choose **Highlight seams** to mark removed pixels red, or **Modify image** to preview the resized result.
 3. Choose **Width** or **Height**, then set a target with the number field or slider. The preview moves toward that target as seams become available. Only one dimension can be adjusted at a time.
-4. Save a PNG. Highlight mode saves an original-size marked image; Modify mode saves the smaller image. **Restore original** returns the selected dimension to its starting size.
+4. In Modify mode, use **Compare with original** and its slider to reveal the original and resized previews side by side within the same image frame. Each keeps its natural aspect ratio.
+5. Save a PNG. Highlight mode saves an original-size marked image; Modify mode saves the smaller image. **Restore original** returns the selected dimension to its starting size.
 
 The **Info** tab in the app explains the same algorithm and controls. Enlargement and simultaneous width-and-height adjustment are not supported.
 

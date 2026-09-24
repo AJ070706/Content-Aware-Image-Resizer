@@ -8,6 +8,9 @@
 /* Paint and erase seam pixels without re-encoding the photo or whole overlay. */
 .image-stage canvas.seam-overlay{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:contain;pointer-events:none}
 
+/* Compare the natural-aspect original and resized preview within one frame. */
+.canvasbar-actions{display:flex;align-items:center;gap:14px}.compare-toggle{padding:6px 10px;font-size:11px;background:#232526;color:#c9cccd}.compare-toggle.selected{background:#3a2b20;border-color:#bd7941;color:#ffc28b}.comparison-divider{position:absolute;top:0;bottom:0;width:2px;background:#ffd09e;box-shadow:0 0 0 1px #151617,0 0 12px #000b;transform:translateX(-1px);pointer-events:none}.comparison-control{display:flex;align-items:center;gap:12px;margin-top:12px;color:#aeb4b7;font-size:11px}.comparison-control input{flex:1;min-width:0;accent-color:#ec913d;cursor:pointer}
+
 /* Application tabs and the scrollable in-app guide. */
 main[hidden],.info-view[hidden]{display:none}
 .app-tabs{display:flex;align-items:center;gap:4px;padding:4px;background:#111314;border:1px solid #303233;border-radius:9px}.app-tabs button{border:0;background:transparent;color:#aeb4b7;padding:9px 15px}.app-tabs button[aria-selected="true"]{background:#3a2b20;color:#ffc28b}

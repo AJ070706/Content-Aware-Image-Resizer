@@ -138,6 +138,8 @@ function App() {
   const requestIdRef = useRef(0);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [zoom, setZoom] = useState('fit');
+  const [compare, setCompare] = useState(false);
+  const [comparison, setComparison] = useState(50);
   const [message, setMessage] = useState('Open an image to get started.');
   const [error, setError] = useState('');
 
@@ -154,6 +156,7 @@ function App() {
     progress !== null && !progress.done && progress.computed < maximum - displayedSize + 1;
   const previewWidth = pic ? (mode === 'modify' && direction === 'width' ? displayedSize : pic.width) : 0;
   const previewHeight = pic ? (mode === 'modify' && direction === 'height' ? displayedSize : pic.height) : 0;
+  const comparing = !!pic && mode === 'modify' && compare;
 
   useLayoutEffect(() => {
     // Switching image, direction, or mode starts from the unmodified source.
@@ -288,6 +291,8 @@ function App() {
     setSettledId(0);
     setPreviewFailed(false);
     setProgress(null);
+    setCompare(false);
+    setComparison(50);
     setMessage('Image loaded. Both seam orders are calculating in the background.');
   });
 
@@ -335,14 +340,19 @@ function App() {
         <button className="primary" disabled={!pic || busy || pending || previewFailed} onClick={() => action(async api => { const path = await api.save_image(); if (path) setMessage('Image saved.'); })}>Save image ↗</button></div>
     </header>
     <main id="workspace-panel" role="tabpanel" aria-labelledby="workspace-tab" hidden={activeTab !== 'workspace'}><section className="workspace">
-      <div className="canvasbar"><span>{pic?.name ?? 'Your workspace'}</span><label>View <select value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">Fit to window</option><option value="1">100%</option><option value="0.5">50%</option><option value="0.25">25%</option></select></label></div>
+      <div className="canvasbar"><span>{pic?.name ?? 'Your workspace'}</span><div className="canvasbar-actions">
+        <button className={comparing ? 'compare-toggle selected' : 'compare-toggle'} aria-pressed={comparing} disabled={!pic || mode !== 'modify'} onClick={() => setCompare(value => !value)}>Compare with original</button>
+        <label>View <select value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">Fit to window</option><option value="1">100%</option><option value="0.5">50%</option><option value="0.25">25%</option></select></label>
+      </div></div>
       <div className={'canvas ' + (zoom === 'fit' ? 'fit' : 'actual')} aria-busy={busy || pending}>
-        {pic ? <div className="image-stage" style={zoom === 'fit' ? {} : { width: previewWidth * Number(zoom), height: previewHeight * Number(zoom) }}>
-          {mode === 'highlight' && <img className="base-image" alt="Image preview" src={pic.preview} />}
-          <canvas className="seam-overlay" aria-hidden={mode === 'highlight'} role={mode === 'modify' ? 'img' : undefined} aria-label={mode === 'modify' ? 'Modified image preview' : undefined} ref={canvasRef} width={pic.width} height={pic.height} />
+        {pic ? <div className={'image-stage' + (comparing ? ' comparing' : '')} style={zoom === 'fit' ? {} : { width: (comparing ? pic.width : previewWidth) * Number(zoom), height: (comparing ? pic.height : previewHeight) * Number(zoom) }}>
+          {(mode === 'highlight' || comparing) && <img className="base-image" alt="Original image" src={pic.preview} />}
+          <canvas className="seam-overlay" aria-hidden={mode === 'highlight'} role={mode === 'modify' ? 'img' : undefined} aria-label={mode === 'modify' ? 'Modified image preview' : undefined} ref={canvasRef} width={pic.width} height={pic.height} style={comparing ? { clipPath: `inset(0 ${100 - comparison}% 0 0)` } : undefined} />
+          {comparing && <div className="comparison-divider" style={{ left: `${comparison}%` }} aria-hidden="true" />}
         </div>
           : <div className="empty"><span className="emptyicon">▧</span><h1>A new perspective<br />on your images.</h1><p>Explore the seams that shape an image.<br />Everything stays on your computer.</p><button className="primary" disabled={!ready || busy} onClick={open}>Choose an image</button><small>PNG · JPEG · WEBP · BMP · TIFF</small></div>}
       </div>
+      {comparing && <div className="comparison-control"><span>Modified</span><input aria-label="Before and after comparison" type="range" min="0" max="100" value={comparison} onChange={event => setComparison(Number(event.target.value))} /><span>Original</span></div>}
     </section>
     <aside><div className="eyebrow">IMAGE TOOLS</div><h2>Explore the seams</h2><p className="intro">Both seam directions calculate once in the background as soon as an image loads.</p>
       <div className="dimensions"><span>Original dimensions</span><strong>{pic ? `${pic.width} × ${pic.height}` : '— × —'} <small>px</small></strong></div>

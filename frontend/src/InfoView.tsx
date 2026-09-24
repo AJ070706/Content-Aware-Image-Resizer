@@ -22,7 +22,7 @@ export function InfoView({ hidden }: InfoViewProps) {
             <li><strong>Open an image.</strong> Width and height seam orders start calculating in the background.</li>
             <li><strong>Choose a mode.</strong> Highlight seams marks pixels red; Modify image removes them in the preview.</li>
             <li><strong>Choose width or height.</strong> Enter a target size or move the slider. You can adjust one dimension at a time.</li>
-            <li><strong>Save the PNG.</strong> Highlight saves an original-size marked image; Modify saves the resized image. Restore original returns the target to its starting size.</li>
+            <li><strong>Compare and save.</strong> In Modify mode, turn on Compare with original and move the before/after slider. Highlight saves an original-size marked PNG; Modify saves the resized PNG. Restore original returns the target to its starting size.</li>
           </ol>
         </section>
         <section className="info-card seam-example" aria-labelledby="seam-example-title">
