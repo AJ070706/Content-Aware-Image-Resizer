@@ -1,4 +1,6 @@
 $ErrorActionPreference = 'Stop'
+# Build an isolated source snapshot, native module, UI bundle, and one-file app.
+# Keep every build until a verified commit is pushed; prune-builds.ps1 handles retention.
 $repo = Split-Path $PSScriptRoot -Parent
 $python = Join-Path $repo '.venv\Scripts\python.exe'
 if (!(Test-Path $python)) { throw 'Create .venv and install requirements-build.txt first. See README.md.' }
@@ -10,6 +12,7 @@ function Run-Checked([string]$Program, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
 }
 try {
+    # A unique directory makes failed builds inspectable without overwriting prior output.
     $source = Join-Path $build 'source'
     New-Item -ItemType Directory -Path $source,(Join-Path $build 'app') | Out-Null
     Copy-Item (Join-Path $repo 'src\*.py'),(Join-Path $repo 'src\*.cpp') $source
@@ -24,6 +27,7 @@ try {
     Push-Location $source
     try { Run-Checked $python @('setup.py','build_ext','--build-lib','../app','--build-temp','../temp') } finally { Pop-Location }
     Copy-Item (Join-Path $source 'desktop.py') (Join-Path $build 'app\desktop.py')
+    # PyInstaller embeds the frontend and native extension in a single Windows executable.
     Run-Checked $python @('-m','PyInstaller','--noconfirm','--onefile','--windowed','--name','ImageResizer','--distpath',(Join-Path $build 'release'),'--workpath',(Join-Path $build 'package'),'--specpath',$build,'--paths',(Join-Path $build 'app'),'--hidden-import','main','--add-data',((Join-Path $build 'app\ui') + ';ui'),(Join-Path $build 'app\desktop.py'))
     & $python -m pip freeze | Set-Content (Join-Path $build 'dependencies.txt')
     git -C $repo rev-parse HEAD | Set-Content (Join-Path $build 'source-base-commit.txt')

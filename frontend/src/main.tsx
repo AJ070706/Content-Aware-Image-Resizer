@@ -1,12 +1,16 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { InfoView } from './InfoView';
 import './style.css';
+
+// The desktop bridge supplies immutable seam positions; this file owns the live canvas preview.
 
 type Picture = { name: string; width: number; height: number; preview: string; generation: number };
 type SeamBatch = { first: number; seams: number[][] };
 type Progress = { computed: number; total: number; done: boolean; error: string | null };
 type Direction = 'width' | 'height';
 type Mode = 'highlight' | 'modify';
+type Tab = 'workspace' | 'info';
 type Api = {
   open_image: () => Promise<Picture | null>;
   reset: () => Promise<Picture>;
@@ -25,6 +29,7 @@ type TargetControlProps = {
   onChange: (value: number) => void;
 };
 
+/** A number field and slider editing the same selected dimension. */
 function TargetControl({ direction, maximum, value, disabled, onChange }: TargetControlProps) {
   const [input, setInput] = useState(String(value));
   useEffect(() => setInput(String(value)), [value, direction]);
@@ -43,6 +48,7 @@ function TargetControl({ direction, maximum, value, disabled, onChange }: Target
   </div>;
 }
 
+/** Paint or erase one seam at its original pixel coordinates. */
 function paintSeam(canvas: HTMLCanvasElement, pixels: number[], width: number, add: boolean) {
   const context = canvas.getContext('2d');
   if (!context) throw new Error('The image preview canvas is unavailable.');
@@ -60,6 +66,7 @@ function paintSeam(canvas: HTMLCanvasElement, pixels: number[], width: number, a
   }
 }
 
+/** Decode the source PNG once for browser-side resized previews. */
 function loadOriginalPixels(pic: Picture): Promise<Uint32Array> {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -77,6 +84,7 @@ function loadOriginalPixels(pic: Picture): Promise<Uint32Array> {
   });
 }
 
+/** Compact surviving pixels into the selected output dimension. */
 function drawModified(canvas: HTMLCanvasElement, original: Uint32Array, removed: Uint8Array,
   width: number, height: number, direction: Direction, count: number) {
   const outputWidth = width - (direction === 'width' ? count : 0);
@@ -109,6 +117,7 @@ function nextFrame() {
 }
 
 function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('workspace');
   const [ready, setReady] = useState(!!window.pywebview?.api);
   const [busy, setBusy] = useState(false);
   const [pic, setPic] = useState<Picture | null>(null);
@@ -116,6 +125,7 @@ function App() {
   const drawnCountRef = useRef(0);
   const imageGenerationRef = useRef<number | null>(null);
   const seamCacheRef = useRef<Record<Direction, Map<number, number[]>>>({ width: new Map(), height: new Map() });
+  // The mask is reversible: moving the slider back restores cached pixels.
   const removedPixelsRef = useRef<Uint8Array | null>(null);
   const originalPixelsRef = useRef<{ generation: number; pixels: Promise<Uint32Array> } | null>(null);
   const [mode, setMode] = useState<Mode>('highlight');
@@ -146,6 +156,7 @@ function App() {
   const previewHeight = pic ? (mode === 'modify' && direction === 'height' ? displayedSize : pic.height) : 0;
 
   useLayoutEffect(() => {
+    // Switching image, direction, or mode starts from the unmodified source.
     if (!pic || !canvasRef.current) return;
     const canvas = canvasRef.current;
     canvas.width = pic.width;
@@ -160,6 +171,7 @@ function App() {
   }, [pic?.generation, direction, mode]);
 
   useEffect(() => {
+    // Poll only while a request is active; an old poll must not overwrite the new direction.
     if (!pending || !ready) return;
     let active = true;
     let polling = false;
@@ -178,6 +190,7 @@ function App() {
   }, [pending, direction, ready]);
 
   useEffect(() => {
+    // Reconcile the currently displayed seam count with the newest target in small frame batches.
     if (!ready || !pic || requestId === 0) return;
     let active = true;
     const api = window.pywebview!.api;
@@ -246,6 +259,7 @@ function App() {
   }, [ready, pic, mode, direction, target, requestId]);
 
   function requestPreview() {
+    // Incrementing the ID invalidates any earlier async bridge response.
     requestIdRef.current += 1;
     setRequestId(requestIdRef.current);
     setProgress(null);
@@ -303,12 +317,24 @@ function App() {
     setMessage('Returning to the original image.');
   };
 
+  function handleTabKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    const next = event.key === 'ArrowLeft' ? 'workspace' : event.key === 'ArrowRight' ? 'info' : null;
+    if (!next) return;
+    event.preventDefault();
+    setActiveTab(next);
+    document.getElementById(`${next}-tab`)?.focus();
+  }
+
   return <div className="app">
-    <header><div className="brand"><span className="mark">▧</span><div><strong>ImageResizer</strong><small>SEAM EXPLORER</small></div></div>
+    <header><div className="brand"><span className="mark">▧</span><div><strong>Content-Aware Resizer</strong><small>SEAM EXPLORER</small></div></div>
+      <nav className="app-tabs" role="tablist" aria-label="Application pages" onKeyDown={handleTabKeyDown}>
+        <button id="workspace-tab" role="tab" aria-controls="workspace-panel" aria-selected={activeTab === 'workspace'} tabIndex={activeTab === 'workspace' ? 0 : -1} onClick={() => setActiveTab('workspace')}>Workspace</button>
+        <button id="info-tab" role="tab" aria-controls="info-panel" aria-selected={activeTab === 'info'} tabIndex={activeTab === 'info' ? 0 : -1} onClick={() => setActiveTab('info')}>Info</button>
+      </nav>
       <div className="toolbar"><button disabled={!ready || busy} onClick={open}>Open image</button>
         <button className="primary" disabled={!pic || busy || pending || previewFailed} onClick={() => action(async api => { const path = await api.save_image(); if (path) setMessage('Image saved.'); })}>Save image ↗</button></div>
     </header>
-    <main><section className="workspace">
+    <main id="workspace-panel" role="tabpanel" aria-labelledby="workspace-tab" hidden={activeTab !== 'workspace'}><section className="workspace">
       <div className="canvasbar"><span>{pic?.name ?? 'Your workspace'}</span><label>View <select value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">Fit to window</option><option value="1">100%</option><option value="0.5">50%</option><option value="0.25">25%</option></select></label></div>
       <div className={'canvas ' + (zoom === 'fit' ? 'fit' : 'actual')} aria-busy={busy || pending}>
         {pic ? <div className="image-stage" style={zoom === 'fit' ? {} : { width: previewWidth * Number(zoom), height: previewHeight * Number(zoom) }}>
@@ -335,6 +361,7 @@ function App() {
       <button className="full quiet" disabled={!pic || busy} onClick={reset}>Restore original</button>
       <div className="note"><span className="dot" /> {mode === 'modify' ? 'Modify mode' : 'Highlight mode'}<p>{mode === 'modify' ? 'Seams are removed from the selected dimension. Saving exports the resized image.' : 'Red marks show the selected seam direction. Saving exports the original-size image with seams highlighted.'} The other direction is calculated simultaneously.</p></div>
     </aside></main>
+    <InfoView hidden={activeTab !== 'info'} />
     <footer><span role={error ? 'alert' : 'status'} className={error ? 'error' : ''}>{error || (!ready ? 'Connecting to the desktop app…' : busy ? 'Working…' : pending ? (waitingForCalculation ? 'Waiting for the next seam to calculate…' : mode === 'modify' ? 'Updating resized image…' : 'Updating highlighted seams…') : message)}</span><span>LOCAL PROCESSING</span></footer>
   </div>;
 }

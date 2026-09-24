@@ -1,7 +1,7 @@
-# setup.py
+"""Build the `main` pybind11 module imported by the desktop host."""
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 import pybind11
-from setuptools import setup, Extension
+from setuptools import setup
 
 ext_modules = [
     Pybind11Extension(

@@ -1,10 +1,38 @@
-# ImageResizer
+# Content-Aware Image Resizer
 
-A local desktop image-processing application with a React/TypeScript interface, a Python desktop host, and a C++ seam-carving engine.
+A Windows desktop app that resizes images by removing low-energy seams. A React/TypeScript interface talks to a Python desktop host and a C++ seam-carving engine. Processing stays on your computer.
 
-## Current capabilities
+## Use the app
 
-Open images, highlight or remove vertical and horizontal seams, restore the original, change preview scale, and export PNG files. Choose either width or height, then set its target with the number field or slider. Highlight seams shows red marks and saves an original-size PNG; Modify image previews and saves the resized PNG. Width and height are adjusted separately, and enlargement is unsupported. The original Tkinter interface remains in `src/main.py` as a legacy reference.
+1. Open a PNG, JPEG, WebP, BMP, or TIFF image. Vertical and horizontal seam orders begin calculating in separate background workers.
+2. Choose **Highlight seams** to mark removed pixels red, or **Modify image** to preview the resized result.
+3. Choose **Width** or **Height**, then set a target with the number field or slider. The preview moves toward that target as seams become available. Only one dimension can be adjusted at a time.
+4. Save a PNG. Highlight mode saves an original-size marked image; Modify mode saves the smaller image. **Restore original** returns the selected dimension to its starting size.
+
+The **Info** tab in the app explains the same algorithm and controls. Enlargement and simultaneous width-and-height adjustment are not supported.
+
+## How seam carving works here
+
+A vertical seam contains one pixel in every row. Consecutive seam pixels may stay in the same column or move one column left or right. A horizontal seam follows the equivalent path across columns. The engine uses **backward energy**: for each pixel, it sums absolute RGB differences between its left and right neighbors and between its upper and lower neighbors. At image edges, missing neighbors are replaced with the nearest edge pixel. High-contrast detail therefore tends to have higher cost.
+
+Dynamic programming finds the connected seam with the lowest total energy. It stores the cheapest cost to reach each pixel from the previous row, chooses the cheapest bottom endpoint, then backtracks. Equal costs choose the leftmost endpoint or predecessor. The selected seam is removed, and energy is recalculated on the smaller image before the next seam. Horizontal seams use the same algorithm on a transposed image.
+
+After an image loads, the desktop host starts **independent** width and height calculations from the original image. Each worker publishes completed seam positions in original-image coordinates. The UI fetches those positions in small batches. Highlight mode paints or erases red marks; Modify mode compacts the surviving pixels into a new canvas. Moving the slider backward restores pixels from the cached order. Save renders the selected seam prefix in C++, so the exported pixels match the preview.
+
+This is local color-difference energy, not subject recognition, forward energy, or a protected-region mask. A low-energy seam may still cross an important subject. The native `main.modify` function can shrink both dimensions in one call, width first, but the desktop UI deliberately selects only one because its two cached seam orders were computed independently.
+
+## Project layout
+
+| Path | Purpose |
+| --- | --- |
+| `frontend/src/` | React controls, live canvas preview, and in-app algorithm guide |
+| `src/desktop.py` | pywebview file dialogs, image state, worker threads, and save API |
+| `src/main.cpp` | C++ backward-energy seam search, cached orders, highlighting, and resizing |
+| `src/setup.py` | pybind11 extension build |
+| `scripts/build.ps1` | timestamped build and single-file Windows executable |
+| `scripts/prune-builds.ps1` | retain one verified build after its commit is pushed |
+| `tests/` | native correctness and desktop bridge tests |
+| `legacy/` | unused earlier Tkinter interface |
 
 ## Windows setup
 
@@ -19,7 +47,9 @@ cd ..
 powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 ```
 
-Each build creates a new timestamped directory under `build/`, preserving older builds. It contains the source snapshot, logs, compiled extension, bundled frontend, dependency versions, and `release/ImageResizer.exe`.
+Each build creates a new timestamped directory under `build/` with a source snapshot, logs, compiled extension, frontend bundle, dependency versions, and `release/ImageResizer.exe`. Builds remain separate during development. After a build passes tests and the packaged startup check and its source commit is pushed, run `.\scripts\prune-builds.ps1 -KeepBuild .\build\<timestamp>` to keep only that verified build. Use `-WhatIf` to preview cleanup.
+
+`build/` is ignored by Git: GitHub commits save source code, not the generated executables or old build logs. Copy an executable elsewhere if it must be retained before pruning.
 
 ## Single-file executable
 
@@ -29,18 +59,10 @@ The target Windows machine must have Microsoft Edge WebView2 Runtime and .NET Fr
 
 ## Verification
 
-Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\python.exe -m unittest discover -s tests`. The packaged executable accepts `--smoke-test <absolute-result.json>` to check React and bridge startup and exit. The source snapshot and dependency log identify each build independently of later edits.
+Point `PYTHONPATH` at a build's `app` directory, then run `.\.venv\Scripts\python.exe -m unittest discover -s tests`. The packaged executable accepts `--smoke-test <absolute-result.json>` to check React and bridge startup and exit. A local GUI check can verify both tabs, live preview, and saved pixels. The source snapshot and dependency log identify each build independently of later edits.
 
 ## Native engine contract
 
-`main.modify(image, new_width, new_height)` shrinks width first, then height by removing one minimum-energy seam at a time. Energy is the sum of absolute RGB differences between clamped left/right and up/down neighbors. Ties choose the leftmost bottom endpoint, then the leftmost predecessor while backtracking. Horizontal seams use the same rule on the transposed image.
+`main.modify(image, new_width, new_height)` returns a smaller image. `main.highlight(...)` follows the same seam sequence but marks removed pixels red in the original-size image. Both accept nonempty NumPy `uint8` RGB/RGBA arrays, including strided or read-only views, and return independent contiguous arrays while preserving alpha. Targets must be integers from 1 through the original dimension. Invalid arrays, zero-sized targets, and enlargement raise errors. The engine copies input before releasing the Python GIL for the search.
 
-The desktop preview starts independent vertical and horizontal seam-order workers after an image is loaded. They publish completed seams incrementally. A preview waits only for its requested seam prefix; background computation continues afterward. Highlight mode paints seam pixels on a transparent canvas over the original image. Modify mode compacts the remaining pixels into a resized canvas; saving uses the same cached seam order in the native engine. Width and height adjustment are exclusive because each cached seam order is calculated independently from the original image.
-
-Editing the selected target dimension updates either mode automatically; its field and slider share one target value. Switching modes keeps that target, while switching dimensions returns the target to the original size.
-
-The live preview tracks the current size and moves toward the latest target one seam at a time. Seam pixels are fetched in small batches as they become available. Highlight mode paints or erases red seam pixels; Modify mode removes or restores those pixels and compacts the image. The saved PNG is rendered from the same cached seam order. A calculation message appears only while the next required seam is still being computed.
-
-`main.highlight` runs the same carving sequence but marks every removed pixel red at its original position and returns the original dimensions. Both functions accept nonempty NumPy uint8 RGB/RGBA arrays, including strided or read-only views; they return independent contiguous arrays and preserve alpha. Targets must be integers within the original dimensions. Invalid shapes, types, empty images, and enlargement requests raise exceptions. Native computation releases the Python GIL after copying the input.
-
-Native tests use exhaustive path enumeration on small images to verify optimal seams, exact output pixels, original-coordinate highlighting, all valid small target sizes, alpha, input validation, and array layouts.
+Tests compare the native seams with exhaustive path enumeration on small images, check every valid small target size, and verify cached-prefix rendering, input validation, alpha, array layouts, and concurrent calls.

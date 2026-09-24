@@ -13,6 +13,11 @@ import main as engine
 
 
 class ImageApi:
+    """Thread-safe bridge between the React UI and cached native seam orders.
+
+    Each loaded image has a generation number so old async requests cannot select
+    or save a preview after the user opens another image.
+    """
     def __init__(self):
         self._window = None
         self._original = None
@@ -27,6 +32,7 @@ class ImageApi:
         self._latest_preview_request_id = -1
 
     def _snapshot(self):
+        """Return the original image and metadata in a browser-friendly form."""
         buffer = io.BytesIO()
         self._current.save(buffer, format='PNG')
         return dict(name=self._name, width=self._current.width, height=self._current.height,
@@ -34,6 +40,7 @@ class ImageApi:
                     preview='data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
 
     def _load(self, path):
+        """Normalize an image, cancel old work, then start both seam workers."""
         with Image.open(path) as image:
             original = ImageOps.exif_transpose(image).convert('RGB')
         for order in self._orders.values():
@@ -57,6 +64,7 @@ class ImageApi:
         return snapshot
 
     def _calculate_order(self, generation, original, direction, ready_event):
+        """Publish the native order object before computing its seams in place."""
         order = None
         try:
             array = np.ascontiguousarray(np.asarray(original, dtype=np.uint8))
@@ -79,12 +87,14 @@ class ImageApi:
             ready_event.set()
 
     def open_image(self):
+        """Ask the desktop host for a local image and return its snapshot."""
         with self._lock:
             paths = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False,
                 file_types=('Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.tif;*.tiff)',))
             return self._load(paths[0]) if paths else None
 
     def reset(self):
+        """Clear the selected preview without restarting seam calculation."""
         with self._lock:
             if self._original is None:
                 raise ValueError('Open an image first.')
@@ -93,6 +103,7 @@ class ImageApi:
             return self._snapshot()
 
     def preview_progress(self, direction):
+        """Report how many seams are published for the selected dimension."""
         if direction not in ('width', 'height'):
             raise ValueError('Choose either width or height adjustment.')
         with self._lock:
@@ -107,6 +118,7 @@ class ImageApi:
         return dict(computed=computed, total=total, done=done, error=error)
 
     def seam_batch(self, direction, first, limit, image_generation):
+        """Wait for and return available original-coordinate seam positions."""
         with self._lock:
             if self._original is None or image_generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
@@ -135,6 +147,7 @@ class ImageApi:
         return dict(first=first, seams=seams)
 
     def select_preview(self, direction, target, request_id, image_generation, mode='highlight'):
+        """Commit the latest displayed target for Save after the UI catches up."""
         with self._lock:
             if self._original is None or image_generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
@@ -165,6 +178,7 @@ class ImageApi:
         return dict(target=target)
 
     def preview(self, direction, target, request_id=0, image_generation=None):
+        """Return a full overlay for callers using the older preview API."""
         with self._lock:
             if self._original is None:
                 raise ValueError('Open an image first.')
@@ -206,6 +220,7 @@ class ImageApi:
             return dict(overlay=overlay)
 
     def save_image(self):
+        """Render the selected cached prefix as a marked or resized PNG."""
         with self._lock:
             if self._current is None:
                 raise ValueError('Open an image first.')
@@ -229,13 +244,14 @@ class ImageApi:
 
 
 def launch():
+    """Start pywebview, or run a hidden packaged-startup smoke check."""
     base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
     page = base / 'ui' / 'index.html'
     if not page.exists():
         raise RuntimeError('Frontend missing. Run scripts/build.ps1 first.')
     api = ImageApi()
     smoke = '--smoke-test' in sys.argv
-    window = webview.create_window('ImageResizer', str(page), js_api=api,
+    window = webview.create_window('Content-Aware Image Resizer', str(page), js_api=api,
         width=1180, height=780, min_size=(800, 600), background_color='#151617', hidden=smoke)
     api._window = window
     if smoke:

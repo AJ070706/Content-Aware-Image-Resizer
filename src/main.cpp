@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+// Backward-energy seam carving. A seam is recomputed after each removal;
+// SeamOrder publishes the original-coordinate removal order for live previews.
 namespace py = pybind11;
 
 namespace {
@@ -30,6 +32,7 @@ struct Image {
 };
 
 struct CarveWorkspace {
+    // Scratch buffers are reused across seams to avoid repeated large allocations.
     std::vector<uint64_t> previous_cost, current_cost;
     std::vector<int8_t> predecessor;
     std::vector<uint8_t> pixel_scratch;
@@ -37,6 +40,7 @@ struct CarveWorkspace {
 };
 
 int target_dimension(const py::object& value, int maximum, const char* name) {
+    // Use Python's index protocol, but reject bool and enlargement explicitly.
     if (PyBool_Check(value.ptr()) || !PyIndex_Check(value.ptr())) {
         throw py::type_error(std::string(name) + " must be an integer (not a boolean)");
     }
@@ -54,6 +58,7 @@ int target_dimension(const py::object& value, int maximum, const char* name) {
 }
 
 Image read_image(const py::array& input) {
+    // Accept noncontiguous uint8 RGB/RGBA arrays and take one owned copy.
     if (!input.dtype().is(py::dtype::of<uint8_t>()))
         throw py::type_error("image must have dtype uint8");
     if (input.ndim() != 3 || (input.shape(2) != 3 && input.shape(2) != 4))
@@ -73,6 +78,8 @@ Image read_image(const py::array& input) {
 }
 
 std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace) {
+    // Dynamic programming stores two cost rows and a predecessor step per pixel.
+    // Left-to-right traversal makes equal-cost choices deterministic.
     const int w = image.width, h = image.height;
     // Keep only two rows of cumulative costs and one byte of backtracking data
     // per pixel, rather than a 64-bit cumulative-cost image per seam.
@@ -121,6 +128,7 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
 }
 
 void remove_vertical_seam(Image& image, const std::vector<int>& seam, CarveWorkspace& workspace) {
+    // Compact each row; move original indices alongside colors when tracking them.
     if (image.width <= 1 || seam.size() != static_cast<size_t>(image.height))
         throw std::invalid_argument("invalid seam dimensions");
     for (int row = 0; row < image.height; ++row) {
@@ -159,6 +167,7 @@ void remove_vertical_seam(Image& image, const std::vector<int>& seam, CarveWorks
 }
 
 void transpose(Image& image) {
+    // Reuse the vertical algorithm for horizontal seams without changing its tie rule.
     Image result{image.height, image.width, image.channels, {}, {}};
     result.pixels.resize(image.pixels.size());
     result.origins.resize(image.origins.size());
@@ -173,6 +182,7 @@ void transpose(Image& image) {
 }
 
 void carve_width(Image& working, int target, std::vector<uint8_t>* marked, CarveWorkspace& workspace) {
+    // Recompute energy on the smaller image after every removal.
     while (working.width > target) {
         const auto seam = find_vertical_seam(working, workspace);
         if (marked) {
@@ -188,7 +198,7 @@ void carve_width(Image& working, int target, std::vector<uint8_t>* marked, Carve
 }
 
 // One independently ordered direction. Python owns the background worker;
-// this object publishes completed seams incrementally for responsive previews.
+// this object publishes completed, immutable seam prefixes for concurrent readers.
 class SeamOrder {
 public:
     SeamOrder(py::array input, const std::string& direction)
@@ -211,6 +221,7 @@ public:
     }
 
     void compute_all() {
+        // Publish each seam only after all of its original positions are written.
         if (started_.exchange(true)) throw std::runtime_error("seam order calculation has already started");
         try {
             Image working = read_image(input_); // Small, one-time copy before releasing the GIL.
@@ -306,6 +317,7 @@ public:
     }
 
     py::array_t<uint8_t> render_modified(int count) const {
+        // Skip the first count removed original pixels, preserving the order of survivors.
         wait_for_count(count);
         const int output_width = width_ - (horizontal_ ? 0 : count);
         const int output_height = height_ - (horizontal_ ? count : 0);
@@ -344,6 +356,7 @@ public:
     }
 
     py::array_t<uint64_t> seam_positions_batch(int first, int limit) const {
+        // The UI asks for a small prefix; wait only for its first missing seam.
         if (first < 1 || first > total_ || limit < 1)
             throw py::value_error("requested seam batch is outside the available image dimension");
         wait_for_count(first);
@@ -395,6 +408,7 @@ private:
 
 py::array_t<uint8_t> process(const py::array& input, const py::object& width,
                            const py::object& height, bool highlight) {
+    // Synchronous public API: width first, then height on the width-reduced image.
     Image working = read_image(input);
     const int new_width = target_dimension(width, working.width, "new_width");
     const int new_height = target_dimension(height, working.height, "new_height");

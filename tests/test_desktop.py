@@ -1,3 +1,4 @@
+"""Desktop bridge tests with local file dialogs replaced by deterministic results."""
 import base64
 import io
 import tempfile
@@ -17,6 +18,7 @@ class DialogWindow:
 
 
 class DesktopTests(unittest.TestCase):
+    """Exercise selection, export, validation, and stale-request behavior."""
     def test_image_roundtrip_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'input.png'
