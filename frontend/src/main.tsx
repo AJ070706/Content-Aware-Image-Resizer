@@ -6,7 +6,8 @@ import './style.css';
 
 // The desktop bridge supplies immutable seam positions; this file owns the live canvas preview.
 
-type Picture = { name: string; width: number; height: number; preview: string; generation: number };
+type EnergyMode = 'backward' | 'forward';
+type Picture = { name: string; width: number; height: number; preview: string; generation: number; energy_mode: EnergyMode };
 type SeamBatch = { first: number; seams: number[][] };
 type Progress = { computed: number; total: number; done: boolean; error: string | null };
 type Direction = 'width' | 'height';
@@ -21,6 +22,7 @@ type Api = {
   preview_progress: (direction: Direction) => Promise<Progress>;
   save_image: () => Promise<string | null>;
   set_mask: (png: string, generation: number) => Promise<{ generation: number; protected: number; removed: number }>;
+  set_energy_mode: (mode: EnergyMode, generation: number) => Promise<{ generation: number; energy_mode: EnergyMode }>;
 };
 declare global { interface Window { pywebview?: { api: Api } } }
 
@@ -155,6 +157,7 @@ function App() {
   const removedPixelsRef = useRef<Uint8Array | null>(null);
   const originalPixelsRef = useRef<{ generation: number; pixels: Promise<Uint32Array> } | null>(null);
   const [mode, setMode] = useState<Mode>('highlight');
+  const [energyMode, setEnergyMode] = useState<EnergyMode>('backward');
   const [direction, setDirection] = useState<Direction>('width');
   const [target, setTarget] = useState(1);
   const [displayedSize, setDisplayedSize] = useState(1);
@@ -317,6 +320,7 @@ function App() {
     maskRef.current = new BrushMask(image.width, image.height);
     paintingRef.current = null;
     setPic(image);
+    setEnergyMode(image.energy_mode);
     setDirection('width');
     setTarget(image.width);
     setDisplayedSize(image.width);
@@ -470,6 +474,17 @@ function App() {
     requestPreview();
   };
 
+  const chooseEnergyMode = (next: EnergyMode) => {
+    if (!pic || busy || next === energyMode) return;
+    void action(async api => {
+      const result = await api.set_energy_mode(next, pic.generation);
+      setEnergyMode(result.energy_mode);
+      setPic(current => current ? { ...current, generation: result.generation, energy_mode: result.energy_mode } : current);
+      requestPreview();
+      setMessage('Seam quality changed. Both directions are recalculating.');
+    });
+  };
+
   const changeTarget = (next: number) => {
     if (!pic || busy || next === target) return;
     setBrushTool('off');
@@ -524,6 +539,12 @@ function App() {
         <button aria-pressed={mode === 'highlight'} disabled={!pic || busy} className={mode === 'highlight' ? 'selected' : ''} onClick={() => chooseMode('highlight')}>Highlight seams</button>
         <button aria-pressed={mode === 'modify'} disabled={!pic || busy} className={mode === 'modify' ? 'selected' : ''} onClick={() => chooseMode('modify')}>Modify image</button>
       </div>
+      <div className="field">Seam quality</div>
+      <div className="mode-toggle quality-toggle" role="group" aria-label="Seam quality">
+        <button aria-pressed={energyMode === 'backward'} disabled={!pic || busy} className={energyMode === 'backward' ? 'selected' : ''} onClick={() => chooseEnergyMode('backward')}>Classic</button>
+        <button aria-pressed={energyMode === 'forward'} disabled={!pic || busy} className={energyMode === 'forward' ? 'selected' : ''} onClick={() => chooseEnergyMode('forward')}>Forward energy</button>
+      </div>
+      <p className="quality-hint">Forward energy considers the edges created when seams are removed. Switching recalculates both directions.</p>
       <div className="field">Adjust one direction at a time</div>
       <div className="direction-toggle" role="group" aria-label="Dimension to adjust">
         <button aria-pressed={direction === 'width'} disabled={!pic || busy} className={direction === 'width' ? 'selected' : ''} onClick={() => chooseDirection('width')}>Width</button>

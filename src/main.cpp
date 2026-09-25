@@ -14,11 +14,19 @@
 #include <string>
 #include <vector>
 
-// Backward-energy seam carving. A seam is recomputed after each removal;
+// Backward or forward-energy seam carving. A seam is recomputed after each removal;
 // SeamOrder publishes the original-coordinate removal order for live previews.
 namespace py = pybind11;
 
 namespace {
+enum class EnergyMode { Backward, Forward };
+
+EnergyMode parse_energy_mode(const std::string& mode) {
+    if (mode == "backward") return EnergyMode::Backward;
+    if (mode == "forward") return EnergyMode::Forward;
+    throw py::value_error("energy must be 'backward' or 'forward'");
+}
+
 struct Image {
     int width, height, channels;
     std::vector<uint8_t> pixels;
@@ -95,7 +103,7 @@ std::vector<int8_t> read_mask(const py::object& input, int width, int height) {
     return mask;
 }
 
-std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace) {
+std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace, EnergyMode mode) {
     // Dynamic programming stores two cost rows and a predecessor step per pixel.
     // Left-to-right traversal makes equal-cost choices deterministic.
     const int w = image.width, h = image.height;
@@ -111,13 +119,21 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
         const size_t row_offset = static_cast<size_t>(row) * w;
         for (int col = 0; col < w; ++col) {
             int64_t energy = 0;
+            int64_t left_turn = 0, right_turn = 0;
             const auto left = image.offset(row, std::max(0, col - 1));
             const auto right = image.offset(row, std::min(w - 1, col + 1));
             const auto up = image.offset(std::max(0, row - 1), col);
             const auto down = image.offset(std::min(h - 1, row + 1), col);
             for (int c = 0; c < 3; ++c) {
                 energy += std::abs(int(image.pixels[left + c]) - int(image.pixels[right + c]));
-                energy += std::abs(int(image.pixels[up + c]) - int(image.pixels[down + c]));
+                if (mode == EnergyMode::Backward)
+                    energy += std::abs(int(image.pixels[up + c]) - int(image.pixels[down + c]));
+                else if (row > 0) {
+                    // The extra forward costs represent edges created by a
+                    // diagonal seam step when this pixel is removed.
+                    left_turn += std::abs(int(image.pixels[up + c]) - int(image.pixels[left + c]));
+                    right_turn += std::abs(int(image.pixels[up + c]) - int(image.pixels[right + c]));
+                }
             }
             if (!image.mask.empty()) {
                 const int8_t mark = image.mask[row_offset + col];
@@ -129,8 +145,11 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
                 int64_t best = std::numeric_limits<int64_t>::max();
                 int best_col = std::max(0, col - 1);
                 for (int prev = best_col; prev <= std::min(w - 1, col + 1); ++prev) {
-                    if (previous_cost[prev] < best) {
-                        best = previous_cost[prev];
+                    const int64_t transition = mode == EnergyMode::Forward
+                        ? (prev < col ? left_turn : prev > col ? right_turn : 0) : 0;
+                    const int64_t candidate = previous_cost[prev] + transition;
+                    if (candidate < best) {
+                        best = candidate;
                         best_col = prev;
                     }
                 }
@@ -213,10 +232,11 @@ void transpose(Image& image) {
     image = std::move(result);
 }
 
-void carve_width(Image& working, int target, std::vector<uint8_t>* marked, CarveWorkspace& workspace) {
+void carve_width(Image& working, int target, std::vector<uint8_t>* marked,
+                 CarveWorkspace& workspace, EnergyMode mode) {
     // Recompute energy on the smaller image after every removal.
     while (working.width > target) {
-        const auto seam = find_vertical_seam(working, workspace);
+        const auto seam = find_vertical_seam(working, workspace, mode);
         if (marked) {
             for (int row = 0; row < working.height; ++row) {
                 const auto offset = working.origins[working.index(row, seam[row])] * working.channels;
@@ -233,8 +253,9 @@ void carve_width(Image& working, int target, std::vector<uint8_t>* marked, Carve
 // this object publishes completed, immutable seam prefixes for concurrent readers.
 class SeamOrder {
 public:
-    SeamOrder(py::array input, const std::string& direction, py::object mask)
-        : input_(std::move(input)), mask_input_(std::move(mask)), horizontal_(direction == "horizontal") {
+    SeamOrder(py::array input, const std::string& direction, py::object mask, const std::string& energy)
+        : input_(std::move(input)), mask_input_(std::move(mask)),
+          mode_(parse_energy_mode(energy)), horizontal_(direction == "horizontal") {
         if (direction != "horizontal" && direction != "vertical")
             throw py::value_error("direction must be 'horizontal' or 'vertical'");
         if (!input_.dtype().is(py::dtype::of<uint8_t>()))
@@ -279,7 +300,7 @@ public:
                 if (horizontal_) transpose(working);
                 CarveWorkspace workspace;
                 for (int count = 1; count <= total_ && !cancelled_.load(); ++count) {
-                    const auto seam = find_vertical_seam(working, workspace);
+                    const auto seam = find_vertical_seam(working, workspace, mode_);
                     const size_t seam_offset = static_cast<size_t>(count - 1) * seam_length_;
                     for (int row = 0; row < working.height; ++row)
                         ordered_pixels_[seam_offset + row] = working.origins[working.index(row, seam[row])];
@@ -435,6 +456,7 @@ private:
 
     py::array input_; // Retain the source without copying on the image-load path.
     py::object mask_input_;
+    EnergyMode mode_;
     int width_ = 0, height_ = 0, channels_ = 0, total_ = 0, seam_length_ = 0;
     bool horizontal_ = false;
     mutable std::mutex mutex_;
@@ -448,11 +470,12 @@ private:
 };
 
 py::array_t<uint8_t> process(const py::array& input, const py::object& width,
-                           const py::object& height, bool highlight) {
+                            const py::object& height, bool highlight, const std::string& energy) {
     // Synchronous public API: width first, then height on the width-reduced image.
     Image working = read_image(input);
     const int new_width = target_dimension(width, working.width, "new_width");
     const int new_height = target_dimension(height, working.height, "new_height");
+    const EnergyMode mode = parse_energy_mode(energy);
     const int original_width = working.width, original_height = working.height;
     std::vector<uint8_t> marked;
     CarveWorkspace workspace;
@@ -464,10 +487,10 @@ py::array_t<uint8_t> process(const py::array& input, const py::object& width,
             working.origins.resize(static_cast<size_t>(working.width) * working.height);
             std::iota(working.origins.begin(), working.origins.end(), size_t{0});
         }
-        carve_width(working, new_width, highlight ? &marked : nullptr, workspace);
+        carve_width(working, new_width, highlight ? &marked : nullptr, workspace, mode);
         if (working.height != new_height) {
             transpose(working);
-            carve_width(working, new_height, highlight ? &marked : nullptr, workspace);
+            carve_width(working, new_height, highlight ? &marked : nullptr, workspace, mode);
             transpose(working);
         }
     }
@@ -481,17 +504,23 @@ py::array_t<uint8_t> process(const py::array& input, const py::object& width,
 } // namespace
 
 PYBIND11_MODULE(main, m) {
-    m.doc() = "RGB/RGBA uint8 seam carving: width first, then height; shrink only.";
-    m.def("highlight", [](const py::array& image, const py::object& width, const py::object& height) {
-        return process(image, width, height, true);
+    m.doc() = "RGB/RGBA uint8 backward or forward-energy seam carving; shrink only.";
+    m.def("highlight", [](const py::array& image, const py::object& width,
+                           const py::object& height, const std::string& energy) {
+        return process(image, width, height, true, energy);
     }, py::arg("input_image").noconvert(), py::arg("new_width"), py::arg("new_height"),
+       py::arg("energy") = "backward",
     "Mark removed pixels red at their original positions; preserve input dimensions and alpha.");
-    m.def("modify", [](const py::array& image, const py::object& width, const py::object& height) {
-        return process(image, width, height, false);
+    m.def("modify", [](const py::array& image, const py::object& width,
+                        const py::object& height, const std::string& energy) {
+        return process(image, width, height, false, energy);
     }, py::arg("input_image").noconvert(), py::arg("new_width"), py::arg("new_height"),
+       py::arg("energy") = "backward",
     "Remove minimum-energy vertical seams, then horizontal seams, to the requested size.");
     py::class_<SeamOrder, std::shared_ptr<SeamOrder>>(m, "SeamOrder")
-        .def(py::init<py::array, const std::string&, py::object>(), py::arg("image"), py::arg("direction"), py::arg("mask") = py::none())
+        .def(py::init<py::array, const std::string&, py::object, const std::string&>(),
+             py::arg("image"), py::arg("direction"), py::arg("mask") = py::none(),
+             py::arg("energy") = "backward")
         .def("compute_all", &SeamOrder::compute_all,
              "Calculate all seams incrementally; call from a background worker.")
         .def("cancel", &SeamOrder::cancel)

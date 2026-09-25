@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 from desktop import ImageApi
+import main as engine
 
 
 class DialogWindow:
@@ -111,6 +112,51 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(api.preview_progress('height')['total'], 3)
             with self.assertRaises(ValueError): api.set_mask(data_url, opened['generation'])
             with self.assertRaises(ValueError): api.set_mask('bad data', result['generation'])
+
+    def test_energy_switch_restarts_both_directions_and_keeps_guidance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.png'
+            output = Path(directory) / 'forward.png'
+            pixels = np.random.default_rng(650).integers(0, 256, (5, 6, 3), dtype=np.uint8)
+            Image.fromarray(pixels).save(source)
+            api = ImageApi()
+            api._window = DialogWindow([str(source)])
+            opened = api.open_image()
+            self.assertEqual(opened['energy_mode'], 'backward')
+            marks = np.zeros((5, 6, 4), dtype=np.uint8)
+            marks[:, 0] = [53, 217, 133, 255]
+            marks[2, 4] = [236, 69, 92, 255]
+            buffer = io.BytesIO()
+            Image.fromarray(marks, 'RGBA').save(buffer, format='PNG')
+            data_url = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode()
+            masked = api.set_mask(data_url, opened['generation'])
+            switched = api.set_energy_mode('forward', masked['generation'])
+            self.assertGreater(switched['generation'], masked['generation'])
+            self.assertEqual(switched['energy_mode'], 'forward')
+            self.assertEqual(api.preview_progress('width')['total'], 5)
+            self.assertEqual(api.preview_progress('height')['total'], 4)
+            with self.assertRaises(ValueError):
+                api.seam_batch('height', 1, 1, masked['generation'])
+            with self.assertRaises(ValueError):
+                api.set_energy_mode('backward', masked['generation'])
+            with self.assertRaises(ValueError):
+                api.set_energy_mode('invalid', switched['generation'])
+            self.assertEqual(api.set_energy_mode('forward', switched['generation']), switched)
+            self.assertEqual(api._mask[:, 0].tolist(), [1] * 5)
+            for direction in ('width', 'height'):
+                native = engine.SeamOrder(pixels, 'vertical' if direction == 'width' else 'horizontal',
+                                          api._mask, 'forward')
+                native.compute_all()
+                actual = api.seam_batch(direction, 1, 1, switched['generation'])['seams'][0]
+                self.assertEqual(actual, native.seam_positions_batch(1, 1)[0].tolist())
+            api.seam_batch('width', 2, 2, switched['generation'])
+            api.select_preview('width', 4, 1, switched['generation'], 'modify')
+            api._window = DialogWindow(str(output))
+            api.save_image()
+            with Image.open(output) as exported:
+                order = engine.SeamOrder(pixels, 'vertical', api._mask, 'forward')
+                order.compute_all()
+                np.testing.assert_array_equal(np.asarray(exported), order.render_modified(2))
 
     def test_latest_live_preview_wins_when_requests_finish_out_of_order(self):
         started = threading.Event()

@@ -7,30 +7,45 @@ import numpy as np
 import main as engine
 
 
-def reference_seam(image):
+def reference_seam(image, mode='backward', mask=None):
     h, w = image.shape[:2]
     a = image[:, :, :3].astype(np.int64)
-    energy = np.zeros((h, w), dtype=np.int64)
-    for y in range(h):
-        for x in range(w):
-            energy[y, x] = (abs(a[y, max(0, x-1)] - a[y, min(w-1, x+1)]).sum()
-                            + abs(a[max(0, y-1), x] - a[min(h-1, y+1), x]).sum())
     paths = (p for p in itertools.product(range(w), repeat=h)
              if all(abs(x-y) <= 1 for x, y in zip(p, p[1:])))
     # Exhaustive search, independent of the C++ dynamic programming/backtracking.
-    return min(paths, key=lambda p: (sum(energy[y,x] for y,x in enumerate(p)), tuple(reversed(p))))
+    def score(path):
+        cost = 0
+        for y, x in enumerate(path):
+            left = a[y, max(0, x-1)]
+            right = a[y, min(w-1, x+1)]
+            cost += abs(left - right).sum()
+            if mode == 'backward':
+                cost += abs(a[max(0, y-1), x] - a[min(h-1, y+1), x]).sum()
+            elif y:
+                above = a[y-1, x]
+                if path[y-1] < x:
+                    cost += abs(above - left).sum()
+                elif path[y-1] > x:
+                    cost += abs(above - right).sum()
+            if mask is not None:
+                cost += 10000000 if mask[y, x] == 1 else -1000000 if mask[y, x] == -1 else 0
+        return cost, tuple(reversed(path))
+    return min(paths, key=score)
 
 
-def reference(image, width, height):
+def reference(image, width, height, mode='backward', guidance=None):
     working = image.copy()
     ids = np.arange(image.shape[0]*image.shape[1]).reshape(image.shape[:2])
     marked = image.copy().reshape(-1, image.shape[2])
+    mask_values = None if guidance is None else guidance.copy()
     for target, horizontal in [(width, False), (height, True)]:
         if horizontal:
             working = working.swapaxes(0,1)
             ids = ids.T
+            if mask_values is not None:
+                mask_values = mask_values.T
         while working.shape[1] > target:
-            seam = reference_seam(working)
+            seam = reference_seam(working, mode, mask_values)
             mask = np.ones(working.shape[:2], dtype=bool)
             for row,col in enumerate(seam):
                 marked[ids[row,col],:3] = [255,0,0]
@@ -38,9 +53,13 @@ def reference(image, width, height):
             h,w,c = working.shape
             working = working[mask].reshape(h,w-1,c)
             ids = ids[mask].reshape(h,w-1)
+            if mask_values is not None:
+                mask_values = mask_values[mask].reshape(h,w-1)
         if horizontal:
             working = working.swapaxes(0,1)
             ids = ids.T
+            if mask_values is not None:
+                mask_values = mask_values.T
     return working, marked.reshape(image.shape)
 
 
@@ -143,6 +162,50 @@ class NativeTests(unittest.TestCase):
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
             self.assertEqual(order.progress(), (total,total,True))
+
+    def test_forward_energy_matches_exhaustive_seams_and_prefixes(self):
+        rng = np.random.default_rng(930)
+        different = 0
+        for case in range(20):
+            image = rng.integers(0, 256, (4, 5, 4), dtype=np.uint8)
+            image[:, :, 3] = np.arange(20, dtype=np.uint8).reshape(4, 5)
+            if reference_seam(image, 'forward') != reference_seam(image):
+                different += 1
+            for direction in ('vertical', 'horizontal'):
+                order = engine.SeamOrder(image, direction, None, 'forward')
+                order.compute_all()
+                total = (image.shape[1] if direction == 'vertical' else image.shape[0]) - 1
+                for count in range(total + 1):
+                    width = image.shape[1] - count if direction == 'vertical' else image.shape[1]
+                    height = image.shape[0] - count if direction == 'horizontal' else image.shape[0]
+                    expected_modified, expected_highlight = reference(image, width, height, 'forward')
+                    with self.subTest(case=case, direction=direction, count=count):
+                        np.testing.assert_array_equal(order.render_modified(count), expected_modified)
+                        np.testing.assert_array_equal(order.render(count), expected_highlight)
+                        np.testing.assert_array_equal(engine.modify(image, width, height, 'forward'), expected_modified)
+                        np.testing.assert_array_equal(engine.highlight(image, width, height, 'forward'), expected_highlight)
+        self.assertGreater(different, 0)
+
+    def test_forward_energy_respects_brush_guidance_and_rejects_invalid_modes(self):
+        image = np.random.default_rng(931).integers(0, 256, (4, 5, 3), dtype=np.uint8)
+        mask = np.zeros((4, 5), dtype=np.int8)
+        mask[:, 0] = 1
+        mask[2, 3] = -1
+        for direction in ('vertical', 'horizontal'):
+            order = engine.SeamOrder(image, direction, mask, 'forward')
+            order.compute_all()
+            total = (image.shape[1] if direction == 'vertical' else image.shape[0]) - 1
+            for count in range(total + 1):
+                width = image.shape[1] - count if direction == 'vertical' else image.shape[1]
+                height = image.shape[0] - count if direction == 'horizontal' else image.shape[0]
+                modified, highlighted = reference(image, width, height, 'forward', mask)
+                np.testing.assert_array_equal(order.render_modified(count), modified)
+                np.testing.assert_array_equal(order.render(count), highlighted)
+        with self.assertRaises(ValueError):
+            engine.SeamOrder(image, 'vertical', mask, 'unknown')
+        for operation in (engine.modify, engine.highlight):
+            with self.assertRaises(ValueError):
+                operation(image, 4, 4, 'unknown')
 
     def test_incremental_order_cancellation_wakes_waiting_preview(self):
         image = np.random.default_rng(12).integers(0,255,(120,160,3),dtype=np.uint8)

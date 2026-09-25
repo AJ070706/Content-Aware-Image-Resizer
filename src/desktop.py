@@ -23,6 +23,7 @@ class ImageApi:
         self._original = None
         self._current = None
         self._mask = None
+        self._energy_mode = 'backward'
         self._name = ''
         self._lock = threading.Lock()
         self._generation = 0
@@ -37,7 +38,7 @@ class ImageApi:
         buffer = io.BytesIO()
         self._current.save(buffer, format='PNG')
         return dict(name=self._name, width=self._current.width, height=self._current.height,
-                    generation=self._generation,
+                    generation=self._generation, energy_mode=self._energy_mode,
                     preview='data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
 
     def _load(self, path):
@@ -65,16 +66,17 @@ class ImageApi:
         self._latest_preview_request_id = -1
         for direction in ('width', 'height'):
             threading.Thread(target=self._calculate_order,
-                             args=(generation, self._original, self._mask, direction,
-                                   self._order_ready[direction]),
+                             args=(generation, self._original, self._mask, self._energy_mode, direction,
+                                    self._order_ready[direction]),
                              name=f'{direction}-seams', daemon=True).start()
 
-    def _calculate_order(self, generation, original, mask, direction, ready_event):
+    def _calculate_order(self, generation, original, mask, energy_mode, direction, ready_event):
         """Publish the native order object before computing its seams in place."""
         order = None
         try:
             array = np.ascontiguousarray(np.asarray(original, dtype=np.uint8))
-            order = engine.SeamOrder(array, 'vertical' if direction == 'width' else 'horizontal', mask)
+            order = engine.SeamOrder(array, 'vertical' if direction == 'width' else 'horizontal',
+                                     mask, energy_mode)
             with self._lock:
                 if generation != self._generation:
                     order.cancel()
@@ -126,6 +128,18 @@ class ImageApi:
             return dict(generation=self._generation,
                         protected=int(np.count_nonzero(mask == 1)),
                         removed=int(np.count_nonzero(mask == -1)))
+
+    def set_energy_mode(self, mode, image_generation):
+        """Change the seam scoring model and invalidate both cached directions."""
+        if mode not in ('backward', 'forward'):
+            raise ValueError('Choose either Backward or Forward energy.')
+        with self._lock:
+            if self._original is None or image_generation != self._generation:
+                raise ValueError('The image changed before its energy mode was selected.')
+            if mode != self._energy_mode:
+                self._energy_mode = mode
+                self._start_orders()
+            return dict(generation=self._generation, energy_mode=self._energy_mode)
 
     def reset(self):
         """Clear the selected preview without restarting seam calculation."""
