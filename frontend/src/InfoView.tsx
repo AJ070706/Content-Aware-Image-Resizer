@@ -12,7 +12,7 @@ export function InfoView({ hidden }: InfoViewProps) {
       <div className="info-hero">
         <p className="eyebrow">THE METHOD BEHIND THE RESIZE</p>
         <h1>Content-aware resizing through seam carving.</h1>
-        <p>Instead of squeezing every pixel, the app finds connected paths that pass through lower-detail areas and removes those paths one at a time. The result changes an image’s dimensions while keeping the remaining pixels at their original color and scale.</p>
+        <p>Instead of stretching every pixel, the app finds low-cost connected paths called seams. Shrinking removes them; enlarging inserts blended pixels beside distinct seams. The unremoved original pixels keep their colors.</p>
       </div>
 
       <div className="info-columns">
@@ -20,10 +20,11 @@ export function InfoView({ hidden }: InfoViewProps) {
           <h2 id="how-to-use">How to use it</h2>
           <ol>
             <li><strong>Open an image.</strong> Width and height seam orders start calculating in the background.</li>
-            <li><strong>Choose a mode.</strong> Highlight seams marks pixels red; Modify image removes them in the preview.</li>
+            <li><strong>Choose a mode.</strong> Highlight seams marks the chosen paths red; Modify image removes or inserts pixels in the preview.</li>
             <li><strong>Choose seam quality.</strong> Classic prefers low-detail pixels. Forward energy also considers the new edges that removal would create. Switching quality recalculates both seam directions.</li>
             <li><strong>Guide the seams if needed.</strong> Paint green over detail to protect or pink over areas to favor for removal. Erase or clear marks to change your guidance. Each changed stroke restarts both background calculations.</li>
             <li><strong>Choose width or height.</strong> Enter a target size or move the slider to shrink or enlarge up to twice the original size. You can adjust one dimension at a time.</li>
+            <li><strong>Inspect the energy map.</strong> Use the workspace toggle to see the costs behind the first seam for your chosen direction and quality. Red marks that seam. Turn the map off to resume editing.</li>
             <li><strong>Compare and save.</strong> In Modify mode, turn on Compare with original and move the before/after slider. Highlight saves an original-size PNG with removal or insertion paths marked; Modify saves the resized PNG. Restore original returns the target to its starting size.</li>
           </ol>
         </section>
@@ -45,6 +46,28 @@ export function InfoView({ hidden }: InfoViewProps) {
           <article><span className="step-number">02</span><h3>Find the least-cost path</h3><p>Dynamic programming finds the cheapest reachable path through the rows, including the entry cost in Forward energy mode. The engine backtracks from the cheapest bottom pixel to find a vertical seam. For height, it runs the same calculation on a transposed image.</p></article>
           <article><span className="step-number">03</span><h3>Remove or insert</h3><p>After finding a seam, the engine scores the smaller image again and records the path in original-image coordinates. Shrinking removes those pixels. Enlarging inserts new pixels beside distinct recorded paths, blending each with a neighboring pixel. The slider can move through this cached order in either direction.</p></article>
         </div>
+      </section>
+
+      <section className="info-algorithm" aria-labelledby="energy-title">
+        <p className="eyebrow">TWO WAYS TO SCORE A PATH</p>
+        <h2 id="energy-title">Classic and Forward energy</h2>
+        <div className="algorithm-steps">
+          <article><span className="step-number">CLASSIC</span><h3>Preserve existing contrast</h3><p>At each pixel, add the absolute RGB difference between its left and right neighbors to the difference between its upper and lower neighbors. A low score means little local contrast. The least-cost connected path is removed first. This is also called backward energy.</p></article>
+          <article><span className="step-number">FORWARD</span><h3>Consider the new edge</h3><p>Start with the RGB difference between left and right neighbors, which would meet after removal. If the path enters diagonally, add the difference between the upper neighbor and the side neighbor exposed by that move. A straight entry adds nothing extra. This can avoid some breaks that Classic energy overlooks.</p></article>
+          <article><span className="step-number">BOTH MODES</span><h3>Follow the cheapest connected route</h3><p>Dynamic programming accumulates the cheapest cost to reach every pixel from the preceding row. Green guidance adds a large penalty; pink subtracts one. The cheapest bottom endpoint gives the first vertical seam. Height uses the same calculation on a transposed image.</p></article>
+        </div>
+      </section>
+
+      <section className="info-algorithm" aria-labelledby="map-title">
+        <p className="eyebrow">SEE THE DECISION</p>
+        <h2 id="map-title">Reading the energy map</h2>
+        <p>The map displays the <strong>cumulative minimum path cost</strong> to reach each pixel in the original image, using the selected quality mode and brush guidance. Blue is lower cost, orange is higher cost, and red is the first selected seam. Colors are scaled separately within each row for width or each column for height, so compare positions along that row or column rather than colors across the whole image. Forward costs depend on how the path enters a pixel, so this cumulative view is more faithful than a simple pixel-brightness map. After each removal the image changes and the engine recalculates costs; the map does not show later seams.</p>
+      </section>
+
+      <section className="info-algorithm" aria-labelledby="enlarge-title">
+        <p className="eyebrow">ADDING PIXELS</p>
+        <h2 id="enlarge-title">How enlargement works</h2>
+        <p>To enlarge, the engine repeatedly finds and removes low-cost seams on a <strong>temporary shrinking copy</strong>, recording each path’s coordinates in the original image. This keeps the paths distinct. It then starts from the untouched original and inserts one pixel beside each selected path pixel. The inserted RGB and alpha values average that source pixel with the neighboring original pixel; at the far edge it uses the neighbor on the other side. A one-pixel-wide dimension has no different neighbor, so that pixel is duplicated. Horizontal enlargement uses the same process after transposing the image. A single pass can add at most one pixel per original pixel, so the limit is 2× in the selected dimension. Blending softens duplication but cannot invent detail that was absent from the source.</p>
       </section>
 
       <section className="info-limits" aria-labelledby="limits-title">

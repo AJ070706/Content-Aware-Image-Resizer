@@ -20,6 +20,41 @@ class DialogWindow:
 
 class DesktopTests(unittest.TestCase):
     """Exercise selection, export, validation, and stale-request behavior."""
+    def test_energy_map_colors_first_seam_without_changing_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.png'
+            pixels = np.random.default_rng(974).integers(0, 256, (5, 6, 3), dtype=np.uint8)
+            Image.fromarray(pixels).save(source)
+            api = ImageApi()
+            api._window = DialogWindow([str(source)])
+            opened = api.open_image()
+            for direction, native_direction in (('width', 'vertical'), ('height', 'horizontal')):
+                result = api.energy_map(direction, opened['generation'])
+                self.assertEqual(result['generation'], opened['generation'])
+                self.assertEqual(result['direction'], direction)
+                self.assertEqual(result['energy_mode'], 'backward')
+                with Image.open(io.BytesIO(base64.b64decode(result['preview'].split(',')[1]))) as visual:
+                    colored = np.asarray(visual)
+                    self.assertEqual(visual.size, (6, 5))
+                costs, seam = engine.analyze_energy(pixels, native_direction)
+                expected_red = np.zeros((5, 6), dtype=bool)
+                expected_red.ravel()[seam] = True
+                np.testing.assert_array_equal(np.all(colored == [255, 58, 75], axis=2), expected_red)
+                axis = 1 if direction == 'width' else 0
+                low = costs.min(axis=axis, keepdims=True)
+                span = np.maximum(costs.max(axis=axis, keepdims=True) - low, 1)
+                levels = ((costs - low) * 255 // span).astype(np.int32)
+                expected = (np.array([22, 72, 122]) +
+                            (np.array([244, 166, 76]) - [22, 72, 122]) * levels[:, :, None] // 255)
+                np.testing.assert_array_equal(colored[~expected_red], expected.astype(np.uint8)[~expected_red])
+            np.testing.assert_array_equal(np.asarray(api._current), pixels)
+            with self.assertRaises(ValueError):
+                api.energy_map('diagonal', opened['generation'])
+            switched = api.set_energy_mode('forward', opened['generation'])
+            with self.assertRaises(ValueError):
+                api.energy_map('width', opened['generation'])
+            self.assertEqual(api.energy_map('width', switched['generation'])['energy_mode'], 'forward')
+
     def test_image_roundtrip_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / 'input.png'

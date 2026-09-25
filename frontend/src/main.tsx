@@ -8,6 +8,7 @@ import './style.css';
 
 type EnergyMode = 'backward' | 'forward';
 type Picture = { name: string; width: number; height: number; preview: string; generation: number; energy_mode: EnergyMode };
+type EnergyMap = { generation: number; direction: Direction; energy_mode: EnergyMode; preview: string };
 type SeamBatch = { first: number; seams: number[][] };
 type Progress = { computed: number; total: number; done: boolean; error: string | null };
 type Direction = 'width' | 'height';
@@ -23,6 +24,7 @@ type Api = {
   save_image: () => Promise<string | null>;
   set_mask: (png: string, generation: number) => Promise<{ generation: number; protected: number; removed: number }>;
   set_energy_mode: (mode: EnergyMode, generation: number) => Promise<{ generation: number; energy_mode: EnergyMode }>;
+  energy_map: (direction: Direction, generation: number) => Promise<EnergyMap>;
 };
 declare global { interface Window { pywebview?: { api: Api } } }
 
@@ -31,11 +33,12 @@ type TargetControlProps = {
   maximum: number;
   value: number;
   disabled: boolean;
+  disabledHint?: string;
   onChange: (value: number) => void;
 };
 
 /** A number field and slider editing the same selected dimension. */
-function TargetControl({ direction, maximum, value, disabled, onChange }: TargetControlProps) {
+function TargetControl({ direction, maximum, value, disabled, disabledHint, onChange }: TargetControlProps) {
   const [input, setInput] = useState(String(value));
   useEffect(() => setInput(String(value)), [value, direction]);
 
@@ -49,7 +52,7 @@ function TargetControl({ direction, maximum, value, disabled, onChange }: Target
   return <div className="target-control">
     <label className="field">Target {direction}<div className="inputwrap"><input aria-label={`Target ${direction}`} type="number" min="1" max={maximum} value={input} disabled={disabled} onChange={event => editInput(event.target.value)} onBlur={() => setInput(String(value))} /><span>px</span></div></label>
     <input className="target-slider" aria-label={`Target ${direction} slider`} type="range" min="1" max={maximum} step="1" value={value} disabled={disabled} onChange={event => onChange(Number(event.target.value))} />
-    <div className="hint">{disabled ? 'Load an image to choose a target size.' : `Choose between 1 and ${maximum} pixels.`}</div>
+    <div className="hint">{disabled ? (disabledHint ?? 'Load an image to choose a target size.') : `Choose between 1 and ${maximum} pixels.`}</div>
   </div>;
 }
 
@@ -187,6 +190,10 @@ function App() {
   const originalPixelsRef = useRef<{ generation: number; pixels: Promise<Uint32Array> } | null>(null);
   const [mode, setMode] = useState<Mode>('highlight');
   const [energyMode, setEnergyMode] = useState<EnergyMode>('backward');
+  const [showEnergyMap, setShowEnergyMap] = useState(false);
+  const [energyMap, setEnergyMap] = useState<EnergyMap | null>(null);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapError, setMapError] = useState('');
   const [direction, setDirection] = useState<Direction>('width');
   const [target, setTarget] = useState(1);
   const [displayedSize, setDisplayedSize] = useState(1);
@@ -218,7 +225,27 @@ function App() {
     progress.computed < Math.abs(targetCount);
   const previewWidth = pic ? (mode === 'modify' && direction === 'width' ? displayedSize : pic.width) : 0;
   const previewHeight = pic ? (mode === 'modify' && direction === 'height' ? displayedSize : pic.height) : 0;
-  const comparing = !!pic && mode === 'modify' && compare;
+  const comparing = !!pic && mode === 'modify' && compare && !showEnergyMap;
+  const activeMap = showEnergyMap && pic && energyMap?.generation === pic.generation &&
+    energyMap.direction === direction && energyMap.energy_mode === energyMode ? energyMap : null;
+
+  useEffect(() => {
+    if (!showEnergyMap || !ready || !pic) {
+      setMapLoading(false);
+      return;
+    }
+    let active = true;
+    setMapLoading(true);
+    setMapError('');
+    void window.pywebview!.api.energy_map(direction, pic.generation).then(result => {
+      if (active) setEnergyMap(result);
+    }).catch(reason => {
+      if (active) setMapError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      if (active) setMapLoading(false);
+    });
+    return () => { active = false; };
+  }, [showEnergyMap, ready, pic?.generation, direction, energyMode]);
 
   useLayoutEffect(() => {
     // Switching image, direction, or mode starts from the unmodified source.
@@ -506,6 +533,13 @@ function App() {
     requestPreview();
   };
 
+  const toggleEnergyMap = () => {
+    if (!pic || busy) return;
+    setBrushTool('off');
+    setCompare(false);
+    setShowEnergyMap(value => !value);
+  };
+
   const chooseEnergyMode = (next: EnergyMode) => {
     if (!pic || busy || next === energyMode) return;
     void action(async api => {
@@ -546,30 +580,36 @@ function App() {
         <button id="info-tab" role="tab" aria-controls="info-panel" aria-selected={activeTab === 'info'} tabIndex={activeTab === 'info' ? 0 : -1} onClick={() => setActiveTab('info')}>Info</button>
       </nav>
       <div className="toolbar"><button disabled={!ready || busy} onClick={open}>Open image</button>
-        <button className="primary" disabled={!pic || busy || pending || previewFailed} onClick={() => action(async api => { const path = await api.save_image(); if (path) setMessage('Image saved.'); })}>Save image ↗</button></div>
+        <button className="primary" disabled={!pic || busy || pending || previewFailed || showEnergyMap} onClick={() => action(async api => { const path = await api.save_image(); if (path) setMessage('Image saved.'); })}>Save image ↗</button></div>
     </header>
     <main id="workspace-panel" role="tabpanel" aria-labelledby="workspace-tab" hidden={activeTab !== 'workspace'}><section className="workspace">
       <div className="canvasbar"><span>{pic?.name ?? 'Your workspace'}</span><div className="canvasbar-actions">
-        <button className={comparing ? 'compare-toggle selected' : 'compare-toggle'} aria-pressed={comparing} disabled={!pic || mode !== 'modify'} onClick={() => setCompare(value => !value)}>Compare with original</button>
+        <button className={showEnergyMap ? 'compare-toggle selected' : 'compare-toggle'} aria-pressed={showEnergyMap} disabled={!pic || busy} onClick={toggleEnergyMap}>Energy map</button>
+        <button className={comparing ? 'compare-toggle selected' : 'compare-toggle'} aria-pressed={comparing} disabled={!pic || mode !== 'modify' || showEnergyMap} onClick={() => setCompare(value => !value)}>Compare with original</button>
         <label>View <select value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">Fit to window</option><option value="1">100%</option><option value="0.5">50%</option><option value="0.25">25%</option></select></label>
       </div></div>
-      <div className={'canvas ' + (zoom === 'fit' ? 'fit' : 'actual')} aria-busy={busy || pending}>
-        {pic ? <div className={'image-stage' + (comparing ? ' comparing' : '')} style={zoom === 'fit' ? {} : { width: (comparing ? pic.width : previewWidth) * Number(zoom), height: (comparing ? pic.height : previewHeight) * Number(zoom) }}>
-          {(mode === 'highlight' || comparing) && <img className="base-image" alt="Original image" src={pic.preview} />}
-          <canvas className="seam-overlay" aria-hidden={mode === 'highlight'} role={mode === 'modify' ? 'img' : undefined} aria-label={mode === 'modify' ? 'Modified image preview' : undefined} ref={canvasRef} width={pic.width} height={pic.height} style={comparing ? { clipPath: `inset(0 ${100 - comparison}% 0 0)` } : undefined} />
-          <canvas className={'mask-overlay' + (brushTool !== 'off' ? ' painting' : '')} aria-label="Paint seam guidance" ref={maskCanvasRef} width={pic.width} height={pic.height} style={{ display: mode === 'highlight' ? undefined : 'none' }} onPointerDown={startPainting} onPointerMove={continuePainting} onPointerUp={finishPainting} onPointerCancel={cancelPainting} />
+      <div className={'canvas ' + (zoom === 'fit' ? 'fit' : 'actual')} aria-busy={busy || pending || mapLoading}>
+        {pic ? <div className={'image-stage' + (comparing ? ' comparing' : '')} style={zoom === 'fit' ? {} : { width: (showEnergyMap || comparing ? pic.width : previewWidth) * Number(zoom), height: (showEnergyMap || comparing ? pic.height : previewHeight) * Number(zoom) }}>
+          {(showEnergyMap || mode === 'highlight' || comparing) && <img className="base-image" alt={showEnergyMap && activeMap ? 'First-seam cumulative energy map' : 'Original image'} src={activeMap?.preview ?? pic.preview} />}
+          <canvas className="seam-overlay" aria-hidden={showEnergyMap || mode === 'highlight'} role={mode === 'modify' && !showEnergyMap ? 'img' : undefined} aria-label={mode === 'modify' && !showEnergyMap ? 'Modified image preview' : undefined} ref={canvasRef} width={pic.width} height={pic.height} style={showEnergyMap ? { display: 'none' } : comparing ? { clipPath: `inset(0 ${100 - comparison}% 0 0)` } : undefined} />
+          <canvas className={'mask-overlay' + (brushTool !== 'off' && !showEnergyMap ? ' painting' : '')} aria-label="Paint seam guidance" ref={maskCanvasRef} width={pic.width} height={pic.height} style={{ display: mode === 'highlight' && !showEnergyMap ? undefined : 'none' }} onPointerDown={startPainting} onPointerMove={continuePainting} onPointerUp={finishPainting} onPointerCancel={cancelPainting} />
           {comparing && <div className="comparison-divider" style={{ left: `${comparison}%` }} aria-hidden="true" />}
         </div>
           : <div className="empty"><span className="emptyicon">▧</span><h1>A new perspective<br />on your images.</h1><p>Explore the seams that shape an image.<br />Everything stays on your computer.</p><button className="primary" disabled={!ready || busy} onClick={open}>Choose an image</button><small>PNG · JPEG · WEBP · BMP · TIFF</small></div>}
       </div>
+      {showEnergyMap && pic && <div className="energy-map-guide" role="status">
+        <span>{mapError || (mapLoading || !activeMap ? 'Calculating first-seam costs…' : `${direction === 'width' ? 'Vertical' : 'Horizontal'} first seam · ${energyMode === 'backward' ? 'Classic' : 'Forward energy'}`)}</span>
+        <div className="energy-map-legend"><span>Lower cost</span><i aria-hidden="true" /><span>Higher cost</span><b>Red: selected seam</b></div>
+        <small>Colors compare costs within each {direction === 'width' ? 'row' : 'column'}. The map shows the original image’s first seam; later seams are recalculated after removal.</small>
+      </div>}
       {comparing && <div className="comparison-control"><span>Modified</span><input aria-label="Before and after comparison" type="range" min="0" max="100" value={comparison} onChange={event => setComparison(Number(event.target.value))} /><span>Original</span></div>}
     </section>
     <aside><div className="eyebrow">IMAGE TOOLS</div><h2>Explore the seams</h2><p className="intro">Both seam directions calculate once in the background as soon as an image loads.</p>
       <div className="dimensions"><span>Original dimensions</span><strong>{pic ? `${pic.width} × ${pic.height}` : '— × —'} <small>px</small></strong></div>
       <div className="field">Mode</div>
       <div className="mode-toggle" role="group" aria-label="Image mode">
-        <button aria-pressed={mode === 'highlight'} disabled={!pic || busy} className={mode === 'highlight' ? 'selected' : ''} onClick={() => chooseMode('highlight')}>Highlight seams</button>
-        <button aria-pressed={mode === 'modify'} disabled={!pic || busy} className={mode === 'modify' ? 'selected' : ''} onClick={() => chooseMode('modify')}>Modify image</button>
+        <button aria-pressed={mode === 'highlight'} disabled={!pic || busy || showEnergyMap} className={mode === 'highlight' ? 'selected' : ''} onClick={() => chooseMode('highlight')}>Highlight seams</button>
+        <button aria-pressed={mode === 'modify'} disabled={!pic || busy || showEnergyMap} className={mode === 'modify' ? 'selected' : ''} onClick={() => chooseMode('modify')}>Modify image</button>
       </div>
       <div className="field">Seam quality</div>
       <div className="mode-toggle quality-toggle" role="group" aria-label="Seam quality">
@@ -582,23 +622,23 @@ function App() {
         <button aria-pressed={direction === 'width'} disabled={!pic || busy} className={direction === 'width' ? 'selected' : ''} onClick={() => chooseDirection('width')}>Width</button>
         <button aria-pressed={direction === 'height'} disabled={!pic || busy} className={direction === 'height' ? 'selected' : ''} onClick={() => chooseDirection('height')}>Height</button>
       </div>
-      <TargetControl direction={direction} maximum={maximum || 1} value={target} disabled={!pic || busy} onChange={changeTarget} />
-      {pending && <div className="hint progress" role="status">{waitingForCalculation && progress ? `Calculating ${direction} seams: ${progress.computed} of ${progress.total}` : `${mode === 'modify' ? 'Resized' : 'Highlighted'} ${direction}: ${displayedSize} px → ${target} px`}</div>}
-      <button className="full quiet" disabled={!pic || busy} onClick={reset}>Restore original</button>
+      <TargetControl direction={direction} maximum={maximum || 1} value={target} disabled={!pic || busy || showEnergyMap} disabledHint={showEnergyMap ? 'Close the energy map to choose a target size.' : undefined} onChange={changeTarget} />
+      {pending && !showEnergyMap && <div className="hint progress" role="status">{waitingForCalculation && progress ? `Calculating ${direction} seams: ${progress.computed} of ${progress.total}` : `${mode === 'modify' ? 'Resized' : 'Highlighted'} ${direction}: ${displayedSize} px → ${target} px`}</div>}
+      <button className="full quiet" disabled={!pic || busy || showEnergyMap} onClick={reset}>Restore original</button>
       <div className="brush-panel"><div className="field">Guide the seams</div><p>Paint on the original image. Green protects detail; pink favors removal.</p>
         <div className="brush-toggle" role="group" aria-label="Brush tool">
-          <button aria-pressed={brushTool === 'protect'} disabled={!pic || busy} className={brushTool === 'protect' ? 'selected' : ''} onClick={() => chooseBrush('protect')}>Protect</button>
-          <button aria-pressed={brushTool === 'remove'} disabled={!pic || busy} className={brushTool === 'remove' ? 'selected' : ''} onClick={() => chooseBrush('remove')}>Remove</button>
-          <button aria-pressed={brushTool === 'erase'} disabled={!pic || busy} className={brushTool === 'erase' ? 'selected' : ''} onClick={() => chooseBrush('erase')}>Erase</button>
+          <button aria-pressed={brushTool === 'protect'} disabled={!pic || busy || showEnergyMap} className={brushTool === 'protect' ? 'selected' : ''} onClick={() => chooseBrush('protect')}>Protect</button>
+          <button aria-pressed={brushTool === 'remove'} disabled={!pic || busy || showEnergyMap} className={brushTool === 'remove' ? 'selected' : ''} onClick={() => chooseBrush('remove')}>Remove</button>
+          <button aria-pressed={brushTool === 'erase'} disabled={!pic || busy || showEnergyMap} className={brushTool === 'erase' ? 'selected' : ''} onClick={() => chooseBrush('erase')}>Erase</button>
         </div>
-        <label className="brush-size">Brush size <input aria-label="Brush size" type="range" min="2" max="80" value={brushSize} disabled={!pic || busy} onChange={event => setBrushSize(Number(event.target.value))} /><span>{brushSize}px</span></label>
+        <label className="brush-size">Brush size <input aria-label="Brush size" type="range" min="2" max="80" value={brushSize} disabled={!pic || busy || showEnergyMap} onChange={event => setBrushSize(Number(event.target.value))} /><span>{brushSize}px</span></label>
         <div className="mask-count">Original image pixels · Protected: {maskCount.protected} · Removal: {maskCount.removed}</div>
-        <button className="full quiet" disabled={!pic || busy || (!maskCount.protected && !maskCount.removed)} onClick={clearMask}>Clear guidance</button>
+        <button className="full quiet" disabled={!pic || busy || showEnergyMap || (!maskCount.protected && !maskCount.removed)} onClick={clearMask}>Clear guidance</button>
       </div>
       <div className="note"><span className="dot" /> {mode === 'modify' ? 'Modify mode' : 'Highlight mode'}<p>{mode === 'modify' ? 'Lower targets remove seams; higher targets insert blended pixels beside seams. Saving exports the resized image.' : 'Red marks show the seams to remove or insert. Saving exports the original-size marked image.'} The other direction is calculated simultaneously.</p></div>
     </aside></main>
     <InfoView hidden={activeTab !== 'info'} />
-    <footer><span role={error ? 'alert' : 'status'} className={error ? 'error' : ''}>{error || (!ready ? 'Connecting to the desktop app…' : busy ? 'Working…' : pending ? (waitingForCalculation ? 'Waiting for the next seam to calculate…' : mode === 'modify' ? 'Updating resized image…' : 'Updating highlighted seams…') : message)}</span><span>LOCAL PROCESSING</span></footer>
+    <footer><span role={error || (showEnergyMap && mapError) ? 'alert' : 'status'} className={error || (showEnergyMap && mapError) ? 'error' : ''}>{showEnergyMap && mapError || error || (!ready ? 'Connecting to the desktop app…' : showEnergyMap ? mapLoading || !activeMap ? 'Calculating energy map…' : 'First-seam energy map ready.' : busy ? 'Working…' : pending ? (waitingForCalculation ? 'Waiting for the next seam to calculate…' : mode === 'modify' ? 'Updating resized image…' : 'Updating highlighted seams…') : message)}</span><span>LOCAL PROCESSING</span></footer>
   </div>;
 }
 

@@ -104,7 +104,8 @@ std::vector<int8_t> read_mask(const py::object& input, int width, int height) {
     return mask;
 }
 
-std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace, EnergyMode mode) {
+std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspace, EnergyMode mode,
+                                    std::vector<int64_t>* cumulative_costs = nullptr) {
     // Dynamic programming stores two cost rows and a predecessor step per pixel.
     // Left-to-right traversal makes equal-cost choices deterministic.
     const int w = image.width, h = image.height;
@@ -113,6 +114,7 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
     workspace.previous_cost.resize(w);
     workspace.current_cost.resize(w);
     workspace.predecessor.resize(static_cast<size_t>(w) * h);
+    if (cumulative_costs) cumulative_costs->resize(static_cast<size_t>(w) * h);
     auto& previous_cost = workspace.previous_cost;
     auto& current_cost = workspace.current_cost;
     auto& predecessor = workspace.predecessor;
@@ -158,6 +160,8 @@ std::vector<int> find_vertical_seam(const Image& image, CarveWorkspace& workspac
                 predecessor[row_offset + col] = static_cast<int8_t>(best_col - col);
             }
         }
+        if (cumulative_costs)
+            std::copy(current_cost.begin(), current_cost.end(), cumulative_costs->begin() + row_offset);
         previous_cost.swap(current_cost);
     }
     std::vector<int> seam(h);
@@ -684,6 +688,42 @@ py::array_t<uint8_t> process(const py::array& input, const py::object& width,
     std::memcpy(result.mutable_data(), pixels.data(), pixels.size());
     return result;
 }
+
+py::tuple analyze_energy(const py::array& input, const std::string& direction,
+                         const py::object& mask, const std::string& energy) {
+    // Report the exact first-pass DP costs and first seam used by SeamOrder.
+    if (direction != "vertical" && direction != "horizontal")
+        throw py::value_error("direction must be 'horizontal' or 'vertical'");
+    const EnergyMode mode = parse_energy_mode(energy);
+    Image working = read_image(input);
+    working.mask = read_mask(mask, working.width, working.height);
+    const int original_width = working.width, original_height = working.height;
+    const bool horizontal = direction == "horizontal";
+    py::array_t<int64_t> costs({original_height, original_width});
+    py::array_t<uint64_t> positions({horizontal ? original_width : original_height});
+    auto* output_costs = costs.mutable_data();
+    auto* output_positions = positions.mutable_data();
+    {
+        py::gil_scoped_release release;
+        if (horizontal) transpose(working);
+        CarveWorkspace workspace;
+        std::vector<int64_t> working_costs;
+        const auto seam = find_vertical_seam(working, workspace, mode, &working_costs);
+        if (horizontal) {
+            for (int row = 0; row < original_height; ++row)
+                for (int col = 0; col < original_width; ++col)
+                    output_costs[static_cast<size_t>(row) * original_width + col] =
+                        working_costs[static_cast<size_t>(col) * original_height + row];
+            for (int col = 0; col < original_width; ++col)
+                output_positions[col] = static_cast<uint64_t>(seam[col]) * original_width + col;
+        } else {
+            std::copy(working_costs.begin(), working_costs.end(), output_costs);
+            for (int row = 0; row < original_height; ++row)
+                output_positions[row] = static_cast<uint64_t>(row) * original_width + seam[row];
+        }
+    }
+    return py::make_tuple(costs, positions);
+}
 } // namespace
 
 PYBIND11_MODULE(main, m) {
@@ -700,6 +740,10 @@ PYBIND11_MODULE(main, m) {
     }, py::arg("input_image").noconvert(), py::arg("new_width"), py::arg("new_height"),
        py::arg("energy") = "backward",
     "Remove or insert minimum-energy vertical seams, then horizontal seams, to the requested size.");
+    m.def("analyze_energy", &analyze_energy, py::arg("input_image").noconvert(),
+          py::arg("direction") = "vertical", py::arg("mask") = py::none(),
+          py::arg("energy") = "backward",
+          "Return first-pass cumulative seam costs and the first seam in original pixel indices.");
     py::class_<SeamOrder, std::shared_ptr<SeamOrder>>(m, "SeamOrder")
         .def(py::init<py::array, const std::string&, py::object, const std::string&>(),
              py::arg("image"), py::arg("direction"), py::arg("mask") = py::none(),

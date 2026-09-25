@@ -165,6 +165,35 @@ class ImageApi:
         computed, total, done = order.progress()
         return dict(computed=computed, total=total, done=done, error=error)
 
+    def energy_map(self, direction, image_generation):
+        """Color the exact first-pass cumulative costs and mark its winning seam."""
+        with self._lock:
+            if self._original is None or image_generation != self._generation:
+                raise ValueError('The image changed before its energy map was ready.')
+            if direction not in ('width', 'height'):
+                raise ValueError('Choose either width or height adjustment.')
+            original = self._original
+            mask = self._mask
+            energy_mode = self._energy_mode
+        pixels = np.ascontiguousarray(np.asarray(original, dtype=np.uint8))
+        costs, seam = engine.analyze_energy(pixels, 'vertical' if direction == 'width' else 'horizontal',
+                                            mask, energy_mode)
+        axis = 1 if direction == 'width' else 0
+        low = costs.min(axis=axis, keepdims=True)
+        span = np.maximum(costs.max(axis=axis, keepdims=True) - low, 1)
+        levels = ((costs - low) * 255 // span).astype(np.int32)
+        cool = np.array([22, 72, 122], dtype=np.int32)
+        warm = np.array([244, 166, 76], dtype=np.int32)
+        colors = (cool + (warm - cool) * levels[:, :, None] // 255).astype(np.uint8)
+        colors.reshape(-1, 3)[seam] = [255, 58, 75]
+        buffer = io.BytesIO()
+        Image.fromarray(colors, 'RGB').save(buffer, format='PNG', compress_level=1)
+        with self._lock:
+            if image_generation != self._generation:
+                raise ValueError('The image changed before its energy map was ready.')
+        return dict(generation=image_generation, direction=direction, energy_mode=energy_mode,
+                    preview='data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii'))
+
     def seam_batch(self, direction, first, limit, image_generation, operation='shrink'):
         """Wait for and return available original-coordinate seam positions."""
         with self._lock:

@@ -33,6 +33,38 @@ def reference_seam(image, mode='backward', mask=None):
     return min(paths, key=score)
 
 
+def reference_cost_map(image, mode='backward', mask=None):
+    """Independent scalar recurrence for first-seam cumulative costs."""
+    height, width = image.shape[:2]
+    rgb = image[:, :, :3].astype(np.int64)
+    costs = np.zeros((height, width), dtype=np.int64)
+
+    def difference(a, b):
+        return int(np.abs(a - b).sum())
+
+    for row in range(height):
+        for col in range(width):
+            left = rgb[row, max(col - 1, 0)]
+            right = rgb[row, min(col + 1, width - 1)]
+            up = rgb[max(row - 1, 0), col]
+            local = difference(left, right)
+            if mode == 'backward':
+                local += difference(up, rgb[min(row + 1, height - 1), col])
+            if mask is not None:
+                local += {1: 10000000, -1: -1000000, 0: 0}[int(mask[row, col])]
+            entries = []
+            if row:
+                for previous in range(max(0, col - 1), min(width, col + 2)):
+                    transition = 0
+                    if mode == 'forward' and previous < col:
+                        transition = difference(up, left)
+                    elif mode == 'forward' and previous > col:
+                        transition = difference(up, right)
+                    entries.append(int(costs[row - 1, previous]) + transition)
+            costs[row, col] = local + (min(entries) if entries else 0)
+    return costs
+
+
 def reference(image, width, height, mode='backward', guidance=None):
     working = image.copy()
     ids = np.arange(image.shape[0]*image.shape[1]).reshape(image.shape[:2])
@@ -109,6 +141,38 @@ def reference_enlargement(image, count, mode='backward', guidance=None, horizont
 
 
 class NativeTests(unittest.TestCase):
+    def test_energy_analysis_matches_independent_costs_and_first_seam(self):
+        rng = np.random.default_rng(972)
+        for channels in (3, 4):
+            for height, width in ((1, 1), (1, 5), (5, 1), (4, 5)):
+                image = rng.integers(0, 256, (height, width, channels), dtype=np.uint8)
+                mask = rng.choice(np.array([-1, 0, 1], dtype=np.int8), (height, width))
+                for direction in ('vertical', 'horizontal'):
+                    oriented = image if direction == 'vertical' else image.swapaxes(0, 1)
+                    guidance = mask if direction == 'vertical' else mask.T
+                    for mode in ('backward', 'forward'):
+                        with self.subTest(shape=image.shape, direction=direction, mode=mode):
+                            actual_costs, positions = engine.analyze_energy(image, direction, mask, mode)
+                            expected = reference_cost_map(oriented, mode, guidance)
+                            if direction == 'horizontal':
+                                expected = expected.T
+                            np.testing.assert_array_equal(actual_costs, expected)
+                            self.assertEqual(actual_costs.dtype, np.int64)
+                            path = reference_seam(oriented, mode, guidance)
+                            expected_positions = ([row * width + col for row, col in enumerate(path)]
+                                                  if direction == 'vertical' else
+                                                  [row * width + col for col, row in enumerate(path)])
+                            np.testing.assert_array_equal(positions, expected_positions)
+                            terminal = expected[-1] if direction == 'vertical' else expected[:, -1]
+                            self.assertEqual(int(terminal.min()), int(actual_costs.ravel()[positions[-1]]))
+
+        image = np.zeros((3, 4, 3), dtype=np.uint8)
+        for args in ((image, 'diagonal'), (image, 'vertical', None, 'other')):
+            with self.assertRaises(ValueError):
+                engine.analyze_energy(*args)
+        with self.assertRaises(ValueError):
+            engine.analyze_energy(image, mask=np.ones((3, 4), dtype=np.int8) * 2)
+
     def check_case(self, image, width, height):
         before = image.copy()
         resized, highlighted = reference(image,width,height)
