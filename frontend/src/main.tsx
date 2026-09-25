@@ -378,8 +378,13 @@ function App() {
     if (maskCanvas) maskCanvas.getContext('2d')?.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
     maskRef.current = new BrushMask(image.width, image.height);
     paintingRef.current = null;
+    setActiveTab('workspace');
     setPic(image);
+    setMode('highlight');
     setEnergyMode(image.energy_mode);
+    setShowEnergyMap(false);
+    setEnergyMap(null);
+    setMapError('');
     setDirection('width');
     setTarget(image.width);
     setDisplayedSize(image.width);
@@ -389,20 +394,17 @@ function App() {
     setProgress(null);
     setCompare(false);
     setComparison(50);
+    setZoom('fit');
     setBrushTool('off');
     setMaskCount({ protected: 0, removed: 0 });
     setMessage('Image loaded. Both seam orders are calculating in the background.');
   });
 
   function chooseBrush(next: BrushTool) {
-    if (!pic || busy) return;
+    if (!pic || busy || mode !== 'highlight' || showEnergyMap) return;
     if (brushTool === next) { setBrushTool('off'); return; }
     // Paint in original-image coordinates, where the guidance mask is defined.
     setBrushTool(next);
-    setCompare(false);
-    setMode('highlight');
-    setTarget(originalSize);
-    requestPreview();
   }
 
   function maskPoint(event: React.PointerEvent<HTMLCanvasElement>, clampToImage = false) {
@@ -441,15 +443,10 @@ function App() {
     setError('');
     try {
       const result = await window.pywebview.api.set_mask(canvas.toDataURL('image/png'), pic.generation);
-      requestIdRef.current += 1;
       setPic(current => current ? { ...current, generation: result.generation } : current);
-      setTarget(originalSize);
-      setRequestId(0);
-      setSettledId(0);
-      setProgress(null);
-      setPreviewFailed(false);
+      requestPreview();
       setMaskCount({ protected: result.protected, removed: result.removed });
-      setMessage('Brush guidance updated. Both seam directions are recalculating.');
+      setMessage('Guidance updated. Your target is unchanged while both seam directions recalculate.');
     } catch (reason) {
       undo();
       const mask = maskRef.current;
@@ -462,7 +459,7 @@ function App() {
   }
 
   function startPainting(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (brushTool === 'off' || busy || maskSavingRef.current || paintingRef.current || event.button !== 0) return;
+    if (mode !== 'highlight' || showEnergyMap || brushTool === 'off' || busy || maskSavingRef.current || paintingRef.current || event.button !== 0) return;
     const point = maskPoint(event);
     const canvas = maskCanvasRef.current;
     if (!point || !canvas || !maskRef.current) return;
@@ -512,7 +509,7 @@ function App() {
     const canvas = maskCanvasRef.current;
     const context = canvas?.getContext('2d');
     const oldMask = maskRef.current;
-    if (!canvas || !context || busy || maskSavingRef.current || !pic || !oldMask || (!oldMask.protectedCount && !oldMask.removedCount)) return;
+    if (!canvas || !context || busy || showEnergyMap || maskSavingRef.current || !pic || !oldMask || (!oldMask.protectedCount && !oldMask.removedCount)) return;
     maskRef.current = new BrushMask(pic.width, pic.height);
     context.clearRect(0, 0, canvas.width, canvas.height);
     setMaskCount({ protected: 0, removed: 0 });
@@ -520,10 +517,11 @@ function App() {
   }
 
   const chooseDirection = (next: Direction) => {
-    if (!pic || busy) return;
+    if (!pic || busy || next === direction) return;
     setDirection(next);
     setTarget(next === 'width' ? pic.width : pic.height);
     requestPreview();
+    setMessage(`${next === 'width' ? 'Width' : 'Height'} selected at its original size. Both seam orders continue in the background.`);
   };
 
   const chooseMode = (next: Mode) => {
@@ -535,8 +533,6 @@ function App() {
 
   const toggleEnergyMap = () => {
     if (!pic || busy) return;
-    setBrushTool('off');
-    setCompare(false);
     setShowEnergyMap(value => !value);
   };
 
@@ -553,7 +549,6 @@ function App() {
 
   const changeTarget = (next: number) => {
     if (!pic || busy || next === target) return;
-    setBrushTool('off');
     setTarget(next);
     requestPreview();
   };
@@ -616,22 +611,24 @@ function App() {
         <button aria-pressed={energyMode === 'backward'} disabled={!pic || busy} className={energyMode === 'backward' ? 'selected' : ''} onClick={() => chooseEnergyMode('backward')}>Classic</button>
         <button aria-pressed={energyMode === 'forward'} disabled={!pic || busy} className={energyMode === 'forward' ? 'selected' : ''} onClick={() => chooseEnergyMode('forward')}>Forward energy</button>
       </div>
-      <p className="quality-hint">Forward energy considers the edges created when seams are removed. Switching recalculates both directions.</p>
+      <p className="quality-hint">Forward energy considers newly joined edges. Switching quality keeps your target and guidance, then recalculates both directions.</p>
       <div className="field">Adjust one direction at a time</div>
       <div className="direction-toggle" role="group" aria-label="Dimension to adjust">
         <button aria-pressed={direction === 'width'} disabled={!pic || busy} className={direction === 'width' ? 'selected' : ''} onClick={() => chooseDirection('width')}>Width</button>
         <button aria-pressed={direction === 'height'} disabled={!pic || busy} className={direction === 'height' ? 'selected' : ''} onClick={() => chooseDirection('height')}>Height</button>
       </div>
-      <TargetControl direction={direction} maximum={maximum || 1} value={target} disabled={!pic || busy || showEnergyMap} disabledHint={showEnergyMap ? 'Close the energy map to choose a target size.' : undefined} onChange={changeTarget} />
+      <p className="transition-hint">Switching direction starts that dimension at its original size. The other direction keeps calculating in the background.</p>
+      <TargetControl key={`${pic?.generation ?? 'empty'}:${direction}`} direction={direction} maximum={maximum || 1} value={target} disabled={!pic || busy || showEnergyMap} disabledHint={showEnergyMap ? 'Close the energy map to choose a target size.' : undefined} onChange={changeTarget} />
       {pending && !showEnergyMap && <div className="hint progress" role="status">{waitingForCalculation && progress ? `Calculating ${direction} seams: ${progress.computed} of ${progress.total}` : `${mode === 'modify' ? 'Resized' : 'Highlighted'} ${direction}: ${displayedSize} px → ${target} px`}</div>}
       <button className="full quiet" disabled={!pic || busy || showEnergyMap} onClick={reset}>Restore original</button>
-      <div className="brush-panel"><div className="field">Guide the seams</div><p>Paint on the original image. Green protects detail; pink favors removal.</p>
+      <div className="brush-panel"><div className="field">Guide the seams</div><p>{mode === 'highlight' ? 'Paint on the original image. Green protects detail; pink favors removal. Guidance also shapes Modify mode.' : 'Existing guidance still shapes this modified preview. Switch to Highlight to paint on the original; your target stays the same.'}</p>
+        {mode === 'modify' && <button className="full quiet edit-guidance" disabled={!pic || busy || showEnergyMap} onClick={() => chooseMode('highlight')}>Edit guidance in Highlight mode</button>}
         <div className="brush-toggle" role="group" aria-label="Brush tool">
-          <button aria-pressed={brushTool === 'protect'} disabled={!pic || busy || showEnergyMap} className={brushTool === 'protect' ? 'selected' : ''} onClick={() => chooseBrush('protect')}>Protect</button>
-          <button aria-pressed={brushTool === 'remove'} disabled={!pic || busy || showEnergyMap} className={brushTool === 'remove' ? 'selected' : ''} onClick={() => chooseBrush('remove')}>Remove</button>
-          <button aria-pressed={brushTool === 'erase'} disabled={!pic || busy || showEnergyMap} className={brushTool === 'erase' ? 'selected' : ''} onClick={() => chooseBrush('erase')}>Erase</button>
+          <button aria-pressed={brushTool === 'protect'} disabled={!pic || busy || showEnergyMap || mode !== 'highlight'} className={brushTool === 'protect' ? 'selected' : ''} onClick={() => chooseBrush('protect')}>Protect</button>
+          <button aria-pressed={brushTool === 'remove'} disabled={!pic || busy || showEnergyMap || mode !== 'highlight'} className={brushTool === 'remove' ? 'selected' : ''} onClick={() => chooseBrush('remove')}>Remove</button>
+          <button aria-pressed={brushTool === 'erase'} disabled={!pic || busy || showEnergyMap || mode !== 'highlight'} className={brushTool === 'erase' ? 'selected' : ''} onClick={() => chooseBrush('erase')}>Erase</button>
         </div>
-        <label className="brush-size">Brush size <input aria-label="Brush size" type="range" min="2" max="80" value={brushSize} disabled={!pic || busy || showEnergyMap} onChange={event => setBrushSize(Number(event.target.value))} /><span>{brushSize}px</span></label>
+        <label className="brush-size">Brush size <input aria-label="Brush size" type="range" min="2" max="80" value={brushSize} disabled={!pic || busy || showEnergyMap || mode !== 'highlight'} onChange={event => setBrushSize(Number(event.target.value))} /><span>{brushSize}px</span></label>
         <div className="mask-count">Original image pixels · Protected: {maskCount.protected} · Removal: {maskCount.removed}</div>
         <button className="full quiet" disabled={!pic || busy || showEnergyMap || (!maskCount.protected && !maskCount.removed)} onClick={clearMask}>Clear guidance</button>
       </div>

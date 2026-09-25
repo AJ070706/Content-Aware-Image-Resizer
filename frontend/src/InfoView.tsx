@@ -22,9 +22,9 @@ export function InfoView({ hidden }: InfoViewProps) {
             <li><strong>Open an image.</strong> Width and height seam orders start calculating in the background.</li>
             <li><strong>Choose a mode.</strong> Highlight seams marks the chosen paths red; Modify image removes or inserts pixels in the preview.</li>
             <li><strong>Choose seam quality.</strong> Classic prefers low-detail pixels. Forward energy also considers the new edges that removal would create. Switching quality recalculates both seam directions.</li>
-            <li><strong>Guide the seams if needed.</strong> Paint green over detail to protect or pink over areas to favor for removal. Erase or clear marks to change your guidance. Each changed stroke restarts both background calculations.</li>
-            <li><strong>Choose width or height.</strong> Enter a target size or move the slider to shrink or enlarge up to twice the original size. You can adjust one dimension at a time.</li>
-            <li><strong>Inspect the energy map.</strong> Use the workspace toggle to see the costs behind the first seam for your chosen direction and quality. Red marks that seam. Turn the map off to resume editing.</li>
+            <li><strong>Guide the seams if needed.</strong> In Highlight mode, paint green over detail to protect or pink over areas to favor for removal. The same guidance affects Modify mode and both directions. Each changed stroke restarts both background calculations without changing your target.</li>
+            <li><strong>Choose width or height.</strong> Enter a target size or move the slider to shrink or enlarge up to twice the original size. Switching direction starts the newly selected dimension at its original size while both background calculations continue.</li>
+            <li><strong>Inspect the energy map.</strong> Use the workspace toggle to see the costs behind the first seam for your chosen direction and quality. Red marks that seam. Turn the map off to resume your previous view and target.</li>
             <li><strong>Compare and save.</strong> In Modify mode, turn on Compare with original and move the before/after slider. Highlight saves an original-size PNG with removal or insertion paths marked; Modify saves the resized PNG. Restore original returns the target to its starting size.</li>
           </ol>
         </section>
@@ -37,6 +37,18 @@ export function InfoView({ hidden }: InfoViewProps) {
           <p>A vertical seam crosses the image from top to bottom, touching one pixel in each row. Adjacent pixels in the path are in the same or neighboring columns. Horizontal seams follow the equivalent rule from left to right.</p>
         </section>
       </div>
+
+      <section className="info-algorithm" aria-labelledby="transitions-title">
+        <p className="eyebrow">WORKFLOW</p>
+        <h2 id="transitions-title">How controls work together</h2>
+        <ul className="transition-list">
+          <li><strong>Highlight ↔ Modify:</strong> The direction, target, seam quality, and painted guidance stay in place. Paint only in Highlight, where the original image provides stable brush coordinates. Use “Edit guidance in Highlight mode” from Modify; its preview will update when you return.</li>
+          <li><strong>Width ↔ Height:</strong> The new direction begins at its original size. Any preview still drawing for the previous direction is replaced. Both seam orders continue calculating and the guidance applies to both.</li>
+          <li><strong>Classic ↔ Forward:</strong> Keep the current direction, target, mode, and guidance. Both orders recalculate under the selected quality; the preview catches up as seams become available.</li>
+          <li><strong>Energy map:</strong> Temporarily show first-seam costs on the original image. Editing and saving pause in this view; closing it restores the selected mode, target, comparison, and brush tool.</li>
+          <li><strong>Open another image:</strong> Return to the Workspace in Highlight at the new image’s original width and fit-to-window zoom, with no painted guidance, comparison, or energy map. Seam quality remains selected.</li>
+        </ul>
+      </section>
 
       <section className="info-algorithm" aria-labelledby="algorithm-title">
         <p className="eyebrow">UNDER THE HOOD</p>

@@ -15,6 +15,19 @@ A Windows desktop app that resizes images by removing or inserting low-cost seam
 
 The **Info** tab in the app explains the same algorithm and controls. Simultaneous width-and-height adjustment is not supported in the desktop interface.
 
+## How controls interact
+
+| Change | What stays | What changes |
+| --- | --- | --- |
+| Highlight ↔ Modify | Direction, target, quality, and guidance | Preview and save output switch between red seam marks and resized pixels. Brushes are usable only on the original image in Highlight; **Edit guidance in Highlight mode** returns there without losing the target. |
+| Width ↔ Height | Image, quality, and guidance; both seam workers keep calculating | The new direction starts at its original size. An unfinished preview in the previous direction is superseded. |
+| Classic ↔ Forward | Direction, target, mode, and guidance | Both seam orders restart under the chosen scoring method; the preview catches up as paths become available. |
+| Change or clear guidance | Direction, target, mode, and quality | Both seam orders restart, and the selected preview is rebuilt. Existing guidance also affects Modify mode even though painting is disabled there. |
+| Energy map on/off | Mode, target, comparison setting, brush selection, and guidance | The map temporarily replaces the image preview. Editing and saving pause until the map is closed. |
+| Open another image | Seam-quality selection | Return to the Workspace in Highlight at the new image's original width and fit-to-window zoom; clear guidance, comparison, and the energy map. |
+
+Saving waits until the latest requested preview is ready. Changing controls while a preview is drawing replaces that preview; an older result cannot become the selected saved image.
+
 ## How seam carving works here
 
 A vertical seam contains one pixel in every row. Consecutive seam pixels may stay in the same column or move one column left or right. A horizontal seam follows the equivalent path across columns. Define `D(a,b)` as the sum of absolute differences of the RGB channels of two pixels; alpha is preserved in output but does not influence seam choice. At image edges, missing neighbors are replaced with the nearest edge pixel.
