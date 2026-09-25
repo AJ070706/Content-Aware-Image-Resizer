@@ -63,6 +63,51 @@ def reference(image, width, height, mode='backward', guidance=None):
     return working, marked.reshape(image.shape)
 
 
+def reference_enlargement(image, count, mode='backward', guidance=None, horizontal=False):
+    """Enumerate distinct paths on a shrinking copy, then blend into the source."""
+    source = image.swapaxes(0, 1) if horizontal else image
+    working = source.copy()
+    h, w = source.shape[:2]
+    origins = (np.arange(image.shape[0] * image.shape[1]).reshape(image.shape[:2]).T
+               if horizontal else np.arange(h * w).reshape(h, w))
+    guidance_working = None if guidance is None else (guidance.T.copy() if horizontal else guidance.copy())
+    selected = np.zeros(image.shape[0] * image.shape[1], dtype=bool)
+    ordered = []
+    for _ in range(min(count, w - 1)):
+        seam = reference_seam(working, mode, guidance_working)
+        positions = [int(origins[row, col]) for row, col in enumerate(seam)]
+        ordered.append(positions)
+        selected[positions] = True
+        keep = np.ones(working.shape[:2], dtype=bool)
+        for row, col in enumerate(seam):
+            keep[row, col] = False
+        working = working[keep].reshape(h, working.shape[1] - 1, source.shape[2])
+        origins = origins[keep].reshape(h, working.shape[1])
+        if guidance_working is not None:
+            guidance_working = guidance_working[keep].reshape(h, working.shape[1])
+    if count == w:
+        positions = [int(value) for value in origins[:, 0]]
+        ordered.append(positions)
+        selected[positions] = True
+    output = np.empty((h, w + count, source.shape[2]), dtype=np.uint8)
+    original_ids = (np.arange(image.shape[0] * image.shape[1]).reshape(image.shape[:2]).T
+                    if horizontal else np.arange(h * w).reshape(h, w))
+    for row in range(h):
+        destination = 0
+        for col in range(w):
+            output[row, destination] = source[row, col]
+            destination += 1
+            if selected[original_ids[row, col]]:
+                neighbor = 0 if w == 1 else col + 1 if col + 1 < w else col - 1
+                output[row, destination] = ((source[row, col].astype(np.uint16) +
+                                             source[row, neighbor].astype(np.uint16)) // 2).astype(np.uint8)
+                destination += 1
+    marked = image.copy().reshape(-1, image.shape[2])
+    marked[selected, :3] = [255, 0, 0]
+    enlarged = output.swapaxes(0, 1) if horizontal else output
+    return np.ascontiguousarray(enlarged), marked.reshape(image.shape), ordered
+
+
 class NativeTests(unittest.TestCase):
     def check_case(self, image, width, height):
         before = image.copy()
@@ -118,7 +163,7 @@ class NativeTests(unittest.TestCase):
             for dtype in [np.float32,np.int16,np.bool_,object]:
                 with self.assertRaises(TypeError): operation(valid.astype(dtype),1,1)
             with self.assertRaises(TypeError): operation(valid.tolist(),1,1)
-            for target in [0,-1,5,2**100]:
+            for target in [0,-1,9,2**100]:
                 with self.assertRaises(ValueError): operation(valid,target,1)
                 with self.assertRaises(ValueError): operation(valid,1,target)
             for target in [1.5,True,'2',None]:
@@ -206,6 +251,65 @@ class NativeTests(unittest.TestCase):
         for operation in (engine.modify, engine.highlight):
             with self.assertRaises(ValueError):
                 operation(image, 4, 4, 'unknown')
+
+    def test_insertion_matches_exhaustive_distinct_paths_and_blended_pixels(self):
+        rng = np.random.default_rng(412)
+        for mode in ('backward', 'forward'):
+            for channels in (3, 4):
+                for height, width in ((1, 1), (1, 4), (4, 1), (3, 4), (4, 3)):
+                    image = rng.integers(0, 256, (height, width, channels), dtype=np.uint8)
+                    for direction, dimension in (('vertical', width), ('horizontal', height)):
+                        horizontal = direction == 'horizontal'
+                        order = engine.SeamOrder(image, direction, None, mode)
+                        order.compute_all()
+                        for count in range(dimension + 1):
+                            enlarged, marked, paths = reference_enlargement(image, count, mode,
+                                                                               horizontal=horizontal)
+                            with self.subTest(mode=mode, shape=image.shape, direction=direction, count=count):
+                                np.testing.assert_array_equal(order.render_enlarged(count), enlarged)
+                                np.testing.assert_array_equal(order.render_insertion(count), marked)
+                                expected_mask = np.zeros(height * width, dtype=bool)
+                                for path in paths:
+                                    expected_mask[path] = True
+                                np.testing.assert_array_equal(order.render_insertion_overlay(count)[:, :, 3] == 255,
+                                                              expected_mask.reshape(height, width))
+                                if count:
+                                    np.testing.assert_array_equal(order.insertion_positions_batch(count, 1)[0], paths[-1])
+                                target_width = width + count if not horizontal else width
+                                target_height = height + count if horizontal else height
+                                np.testing.assert_array_equal(engine.modify(image, target_width, target_height, mode), enlarged)
+                                np.testing.assert_array_equal(engine.highlight(image, target_width, target_height, mode), marked)
+
+    def test_insertion_respects_guidance_and_rejects_more_than_double(self):
+        image = np.random.default_rng(613).integers(0, 256, (4, 5, 3), dtype=np.uint8)
+        guidance = np.zeros((4, 5), dtype=np.int8)
+        guidance[:, 0] = 1
+        guidance[2, 3] = -1
+        for direction, dimension in (('vertical', 5), ('horizontal', 4)):
+            order = engine.SeamOrder(image, direction, guidance, 'forward')
+            order.compute_all()
+            for count in range(dimension + 1):
+                expected, _, paths = reference_enlargement(image, count, 'forward', guidance,
+                                                             horizontal=direction == 'horizontal')
+                np.testing.assert_array_equal(order.render_enlarged(count), expected)
+                if count:
+                    np.testing.assert_array_equal(order.insertion_positions_batch(count, 1)[0], paths[-1])
+        with self.assertRaises(ValueError):
+            engine.modify(image, 11, 4)
+        with self.assertRaises(ValueError):
+            engine.highlight(image, 5, 9)
+        with self.assertRaises(ValueError):
+            engine.SeamOrder(image, 'vertical').insertion_positions_batch(6, 1)
+
+    def test_native_resize_two_dimensions_with_insertion(self):
+        image = np.random.default_rng(783).integers(0, 256, (4, 5, 4), dtype=np.uint8)
+        for mode in ('backward', 'forward'):
+            wider, _, _ = reference_enlargement(image, 2, mode)
+            wider_and_taller, _, _ = reference_enlargement(wider, 1, mode, horizontal=True)
+            np.testing.assert_array_equal(engine.modify(image, 7, 5, mode), wider_and_taller)
+            narrower, _ = reference(image, 3, 4, mode)
+            narrower_and_taller, _, _ = reference_enlargement(narrower, 2, mode, horizontal=True)
+            np.testing.assert_array_equal(engine.modify(image, 3, 6, mode), narrower_and_taller)
 
     def test_incremental_order_cancellation_wakes_waiting_preview(self):
         image = np.random.default_rng(12).integers(0,255,(120,160,3),dtype=np.uint8)

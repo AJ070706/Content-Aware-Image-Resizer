@@ -30,7 +30,7 @@ class DesktopTests(unittest.TestCase):
             opened = api.open_image()
             self.assertEqual(opened['width'], 16)
             self.assertEqual(opened['generation'], 1)
-            for width in [0, 17, 1.5, True, '8']:
+            for width in [0, 33, 1.5, True, '8']:
                 with self.assertRaises(ValueError): api.preview('width', width)
             with self.assertRaises(ValueError): api.preview('width', 12, 1, opened['generation'] - 1)
             result = api.preview('width', 12)
@@ -157,6 +157,39 @@ class DesktopTests(unittest.TestCase):
                 order = engine.SeamOrder(pixels, 'vertical', api._mask, 'forward')
                 order.compute_all()
                 np.testing.assert_array_equal(np.asarray(exported), order.render_modified(2))
+
+    def test_enlargement_previews_and_exports_both_directions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'input.png'
+            output = Path(directory) / 'enlarged.png'
+            pixels = np.random.default_rng(741).integers(0, 256, (4, 5, 3), dtype=np.uint8)
+            Image.fromarray(pixels).save(source)
+            api = ImageApi()
+            api._window = DialogWindow([str(source)])
+            opened = api.open_image()
+            generation = opened['generation']
+            for index, (direction, dimension) in enumerate((('width', 5), ('height', 4))):
+                native = engine.SeamOrder(pixels, 'vertical' if direction == 'width' else 'horizontal')
+                native.compute_all()
+                batch = api.seam_batch(direction, dimension, 1, generation, 'enlarge')
+                self.assertEqual(batch['seams'][0], native.insertion_positions_batch(dimension, 1)[0].tolist())
+                with self.assertRaises(ValueError):
+                    api.seam_batch(direction, dimension, 1, generation, 'shrink')
+                target = dimension * 2
+                self.assertEqual(api.select_preview(direction, target, index * 2 + 1, generation, 'modify'),
+                                 {'target': target})
+                api._window = DialogWindow(str(output))
+                api.save_image()
+                with Image.open(output) as exported:
+                    np.testing.assert_array_equal(np.asarray(exported), native.render_enlarged(dimension))
+                api._window = DialogWindow([str(source)])
+                overlay = api.preview(direction, target, index * 2 + 2, generation)
+                rendered = Image.open(io.BytesIO(base64.b64decode(overlay['overlay'].split(',')[1])))
+                np.testing.assert_array_equal(np.asarray(rendered), native.render_insertion_overlay(dimension))
+            with self.assertRaises(ValueError):
+                api.select_preview('width', 11, 5, generation, 'modify')
+            with self.assertRaises(ValueError):
+                api.select_preview('height', 9, 5, generation, 'modify')
 
     def test_latest_live_preview_wins_when_requests_finish_out_of_order(self):
         started = threading.Event()

@@ -17,7 +17,7 @@ type Tab = 'workspace' | 'info';
 type Api = {
   open_image: () => Promise<Picture | null>;
   reset: () => Promise<Picture>;
-  seam_batch: (direction: Direction, first: number, limit: number, generation: number) => Promise<SeamBatch>;
+  seam_batch: (direction: Direction, first: number, limit: number, generation: number, operation: 'shrink' | 'enlarge') => Promise<SeamBatch>;
   select_preview: (direction: Direction, target: number, requestId: number, generation: number, mode: Mode) => Promise<{ target: number }>;
   preview_progress: (direction: Direction) => Promise<Progress>;
   save_image: () => Promise<string | null>;
@@ -89,7 +89,15 @@ function loadOriginalPixels(pic: Picture): Promise<Uint32Array> {
   });
 }
 
-/** Compact surviving pixels into the selected output dimension. */
+/** Average every channel, including alpha, for an inserted neighbor pixel. */
+function blendedPixel(left: number, right: number) {
+  return (((left & 255) + (right & 255)) >> 1) |
+    (((((left >>> 8) & 255) + ((right >>> 8) & 255)) >> 1) << 8) |
+    (((((left >>> 16) & 255) + ((right >>> 16) & 255)) >> 1) << 16) |
+    (((((left >>> 24) & 255) + ((right >>> 24) & 255)) >> 1) << 24);
+}
+
+/** Compact removed pixels or insert blended pixels at the selected seams. */
 function drawModified(canvas: HTMLCanvasElement, original: Uint32Array, removed: Uint8Array,
   width: number, height: number, direction: Direction, count: number) {
   const outputWidth = width - (direction === 'width' ? count : 0);
@@ -100,7 +108,28 @@ function drawModified(canvas: HTMLCanvasElement, original: Uint32Array, removed:
   if (!context) throw new Error('The image preview canvas is unavailable.');
   const image = context.createImageData(outputWidth, outputHeight);
   const output = new Uint32Array(image.data.buffer);
-  if (direction === 'width') {
+  if (count < 0 && direction === 'width') {
+    let destination = 0;
+    for (let source = 0; source < original.length; source++) {
+      const column = source % width;
+      output[destination++] = original[source];
+      if (removed[source]) {
+        const neighbor = source + (width === 1 ? 0 : column + 1 < width ? 1 : -1);
+        output[destination++] = blendedPixel(original[source], original[neighbor]);
+      }
+    }
+  } else if (count < 0) {
+    const destinationRows = new Uint32Array(width);
+    for (let source = 0; source < original.length; source++) {
+      const column = source % width;
+      const row = Math.floor(source / width);
+      output[destinationRows[column]++ * width + column] = original[source];
+      if (removed[source]) {
+        const neighbor = source + (height === 1 ? 0 : row + 1 < height ? width : -width);
+        output[destinationRows[column]++ * width + column] = blendedPixel(original[source], original[neighbor]);
+      }
+    }
+  } else if (direction === 'width') {
     let destination = 0;
     for (let source = 0; source < original.length; source++) {
       if (!removed[source]) output[destination++] = original[source];
@@ -182,10 +211,11 @@ function App() {
   }, []);
 
   const pending = !!pic && requestId !== 0 && settledId !== requestId;
-  const maximum = pic ? (direction === 'width' ? pic.width : pic.height) : 0;
-  const targetCount = maximum - target;
-  const waitingForCalculation = pending && targetCount > maximum - displayedSize &&
-    progress !== null && !progress.done && progress.computed < maximum - displayedSize + 1;
+  const originalSize = pic ? (direction === 'width' ? pic.width : pic.height) : 0;
+  const maximum = originalSize * 2;
+  const targetCount = originalSize - target;
+  const waitingForCalculation = pending && progress !== null && !progress.done &&
+    progress.computed < Math.abs(targetCount);
   const previewWidth = pic ? (mode === 'modify' && direction === 'width' ? displayedSize : pic.width) : 0;
   const previewHeight = pic ? (mode === 'modify' && direction === 'height' ? displayedSize : pic.height) : 0;
   const comparing = !!pic && mode === 'modify' && compare;
@@ -250,25 +280,27 @@ function App() {
           while (steps < stepsThisFrame && drawnCountRef.current !== desiredCount) {
             if (!active || requestId !== requestIdRef.current) return;
             const current = drawnCountRef.current;
-            if (current < desiredCount) {
-              const next = current + 1;
-              let pixels = cache.get(next);
+            const next = current + Math.sign(desiredCount - current);
+            if (Math.abs(next) > Math.abs(current)) {
+              const seamNumber = Math.abs(next);
+              let pixels = cache.get(seamNumber);
               if (!pixels) {
-                const batch = await api.seam_batch(direction, next, 64, pic.generation);
+                const batch = await api.seam_batch(direction, seamNumber, 64, pic.generation,
+                  next < 0 ? 'enlarge' : 'shrink');
                 if (!active || requestId !== requestIdRef.current) return;
                 batch.seams.forEach((seam, index) => cache.set(batch.first + index, seam));
-                pixels = cache.get(next);
+                pixels = cache.get(seamNumber);
                 if (!pixels) throw new Error('The requested seam was not returned.');
               }
               if (mode === 'highlight') paintSeam(canvasRef.current!, pixels, pic.width, true);
               else for (const pixel of pixels) removedPixelsRef.current![pixel] = 1;
               drawnCountRef.current = next;
             } else {
-              const pixels = cache.get(current);
+              const pixels = cache.get(Math.abs(current));
               if (!pixels) throw new Error('A calculated seam is missing from the cache.');
               if (mode === 'highlight') paintSeam(canvasRef.current!, pixels, pic.width, false);
               else for (const pixel of pixels) removedPixelsRef.current![pixel] = 0;
-              drawnCountRef.current = current - 1;
+              drawnCountRef.current = next;
             }
             steps += 1;
           }
@@ -342,7 +374,7 @@ function App() {
     setBrushTool(next);
     setCompare(false);
     setMode('highlight');
-    setTarget(maximum);
+    setTarget(originalSize);
     requestPreview();
   }
 
@@ -384,7 +416,7 @@ function App() {
       const result = await window.pywebview.api.set_mask(canvas.toDataURL('image/png'), pic.generation);
       requestIdRef.current += 1;
       setPic(current => current ? { ...current, generation: result.generation } : current);
-      setTarget(maximum);
+      setTarget(originalSize);
       setRequestId(0);
       setSettledId(0);
       setProgress(null);
@@ -494,7 +526,7 @@ function App() {
 
   const reset = () => {
     if (!pic || busy) return;
-    setTarget(maximum);
+    setTarget(originalSize);
     requestPreview();
     setMessage('Returning to the original image.');
   };
@@ -563,7 +595,7 @@ function App() {
         <div className="mask-count">Original image pixels · Protected: {maskCount.protected} · Removal: {maskCount.removed}</div>
         <button className="full quiet" disabled={!pic || busy || (!maskCount.protected && !maskCount.removed)} onClick={clearMask}>Clear guidance</button>
       </div>
-      <div className="note"><span className="dot" /> {mode === 'modify' ? 'Modify mode' : 'Highlight mode'}<p>{mode === 'modify' ? 'Seams are removed from the selected dimension. Saving exports the resized image.' : 'Red marks show the selected seam direction. Saving exports the original-size image with seams highlighted.'} The other direction is calculated simultaneously.</p></div>
+      <div className="note"><span className="dot" /> {mode === 'modify' ? 'Modify mode' : 'Highlight mode'}<p>{mode === 'modify' ? 'Lower targets remove seams; higher targets insert blended pixels beside seams. Saving exports the resized image.' : 'Red marks show the seams to remove or insert. Saving exports the original-size marked image.'} The other direction is calculated simultaneously.</p></div>
     </aside></main>
     <InfoView hidden={activeTab !== 'info'} />
     <footer><span role={error ? 'alert' : 'status'} className={error ? 'error' : ''}>{error || (!ready ? 'Connecting to the desktop app…' : busy ? 'Working…' : pending ? (waitingForCalculation ? 'Waiting for the next seam to calculate…' : mode === 'modify' ? 'Updating resized image…' : 'Updating highlighted seams…') : message)}</span><span>LOCAL PROCESSING</span></footer>

@@ -165,15 +165,18 @@ class ImageApi:
         computed, total, done = order.progress()
         return dict(computed=computed, total=total, done=done, error=error)
 
-    def seam_batch(self, direction, first, limit, image_generation):
+    def seam_batch(self, direction, first, limit, image_generation, operation='shrink'):
         """Wait for and return available original-coordinate seam positions."""
         with self._lock:
             if self._original is None or image_generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
             if direction not in ('width', 'height'):
                 raise ValueError('Choose either width or height adjustment.')
+            if operation not in ('shrink', 'enlarge'):
+                raise ValueError('Choose either seam removal or insertion.')
             maximum = self._original.width if direction == 'width' else self._original.height
-            if isinstance(first, bool) or not isinstance(first, int) or not 1 <= first < maximum:
+            last = maximum if operation == 'enlarge' else maximum - 1
+            if isinstance(first, bool) or not isinstance(first, int) or not 1 <= first <= last:
                 raise ValueError('Requested seam is outside the image dimension.')
             if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
                 raise ValueError('Seam batch size must be positive.')
@@ -188,7 +191,8 @@ class ImageApi:
             raise RuntimeError(error)
         if order is None:
             raise RuntimeError('Seam order could not be started.')
-        seams = order.seam_positions_batch(first, limit).tolist()
+        seams = (order.insertion_positions_batch(first, limit) if operation == 'enlarge'
+                 else order.seam_positions_batch(first, limit)).tolist()
         with self._lock:
             if image_generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
@@ -204,8 +208,8 @@ class ImageApi:
             if mode not in ('highlight', 'modify'):
                 raise ValueError('Choose either Highlight seams or Modify image mode.')
             maximum = self._original.width if direction == 'width' else self._original.height
-            if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum:
-                raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum}.')
+            if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum * 2:
+                raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum * 2}.')
             if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id < 0:
                 raise ValueError('Preview request ID must be a nonnegative whole number.')
             if request_id < self._latest_preview_request_id:
@@ -214,9 +218,15 @@ class ImageApi:
             self._selection = None
             order = self._orders[direction]
             count = maximum - target
-        if count:
+        if count > 0:
             if order is None or order.progress()[0] < count:
                 raise RuntimeError('The requested seam has not been calculated yet.')
+        elif count < 0:
+            if order is None:
+                raise RuntimeError('The requested seam has not been calculated yet.')
+            # The final insertion path is published just before the worker sets
+            # done; wait for that path rather than racing the progress flag.
+            order.insertion_positions_batch(-count, 1)
         with self._lock:
             if image_generation != self._generation:
                 raise ValueError('The image changed before its seam preview was ready.')
@@ -235,8 +245,8 @@ class ImageApi:
             if direction not in ('width', 'height'):
                 raise ValueError('Choose either width or height adjustment.')
             maximum = self._original.width if direction == 'width' else self._original.height
-            if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum:
-                raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum}.')
+            if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= maximum * 2:
+                raise ValueError(f'Target {direction} must be a whole number from 1 to {maximum * 2}.')
             if isinstance(request_id, bool) or not isinstance(request_id, int) or request_id < 0:
                 raise ValueError('Preview request ID must be a nonnegative whole number.')
             if request_id < self._latest_preview_request_id:
@@ -257,7 +267,8 @@ class ImageApi:
             raise RuntimeError('Seam order could not be started.')
         count = maximum - target
         buffer = io.BytesIO()
-        Image.fromarray(order.render_overlay(count)).save(buffer, format='PNG', compress_level=1)
+        overlay_image = order.render_overlay(count) if count >= 0 else order.render_insertion_overlay(-count)
+        Image.fromarray(overlay_image).save(buffer, format='PNG', compress_level=1)
         overlay = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
         with self._lock:
             if generation != self._generation:
@@ -283,7 +294,10 @@ class ImageApi:
                 path = path.with_suffix('.png')
             if selection and selection[1]:
                 order, count, mode = selection
-                array = order.render_modified(count) if mode == 'modify' else order.render(count)
+                if mode == 'modify':
+                    array = order.render_modified(count) if count > 0 else order.render_enlarged(-count)
+                else:
+                    array = order.render(count) if count > 0 else order.render_insertion(-count)
                 image = Image.fromarray(array)
             else:
                 image = self._current
