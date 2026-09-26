@@ -2,6 +2,22 @@
 
 A Windows desktop app that resizes images by removing or inserting low-cost seams. A React/TypeScript interface talks to a Python desktop host and a C++ seam-carving engine. Processing stays on your computer.
 
+## Screenshots
+
+These examples use the lighthouse sample image to show the app's main views.
+
+**Highlight seams:** Red paths mark the pixels selected for removal as the target width changes.
+
+![The app highlights vertical seams in red over the lighthouse image](docs/screenshots/seam-preview.png)
+
+**Compare the result:** Reveal the resized image and original side by side with the comparison slider.
+
+![The comparison slider reveals a narrower lighthouse image beside the original](docs/screenshots/compare.png)
+
+**Energy map:** Blue shows lower costs, orange higher costs, and red the selected seam.
+
+![The energy map displays seam costs and the selected vertical path on the lighthouse image](docs/screenshots/energy-map.png)
+
 ## Use the app
 
 1. Open a PNG, JPEG, WebP, BMP, or TIFF image. Vertical and horizontal seam orders begin calculating in separate background workers.
